@@ -1,0 +1,33 @@
+# Contents of /etc/systemd/system/BHS.Temperature.service
+[Unit]
+Description=BHS Temperature Monitoring service
+After=network.target
+# Requires=mariadb.service
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=60
+ExecStart=/usr/local/bin/BHS.Temperature.py
+KillMode=control-group
+KillSignal=SIGTERM
+StandardOutput=syslog
+StandardError=syslog
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
+
+
+
+# deploy:
+# systemctl daemon-reload
+# systemctl enable BHS.Temperature.service
+
+# to start immediately:
+# sudo systemctl start BHS.Temperature.service
+
+# check it out:
+# sudo systemctl status BHS.Temperature

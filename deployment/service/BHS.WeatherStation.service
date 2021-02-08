@@ -1,0 +1,32 @@
+# Contents of /etc/systemd/system/BHS.WeatherStation.service
+[Unit]
+Description=BHS Weather Station service
+After=network.target
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=60
+ExecStart=/usr/local/bin/BHS.WeatherStation.py
+KillMode=control-group
+KillSignal=SIGTERM
+StandardOutput=syslog
+StandardError=syslog
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
+
+
+
+# deploy:
+# systemctl daemon-reload
+# systemctl enable BHS.WeatherStation.service
+
+# to start immediately:
+# sudo systemctl start BHS.WeatherStation.service
+
+# check it out:
+# sudo systemctl status BHS.WeatherStation

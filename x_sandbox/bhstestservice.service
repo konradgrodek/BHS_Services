@@ -1,0 +1,26 @@
+# Contents of /etc/systemd/system/bhstestservice.service
+[Unit]
+Description=BHS Test Service
+After=mariadb.service
+
+[Service]
+Type=simple
+Restart=always
+ExecStart=/usr/local/bin/bhstestservice.py
+KillMode=control-group
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
+
+
+
+# deploy:
+# systemctl daemon-reload
+# systemctl enable bhstestservice.service
+
+# to start immediately:
+# systemctl start bhstestservice.service
+
+# check it out:
+# sudo systemctl status myservice
