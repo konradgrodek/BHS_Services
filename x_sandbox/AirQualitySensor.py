@@ -79,4 +79,4 @@ if __name__ == '__main__':
         pinOnOff.off()
         time.sleep(10)
 
-    print(f'Device {device.name} is closed')
+    print(f'Device {device._component_name} is closed')

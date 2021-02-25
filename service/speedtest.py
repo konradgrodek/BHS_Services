@@ -163,7 +163,9 @@ class SpeedtestService(Service):
         pass
 
     def provideName(self):
-        return 'BHS.Speedtest'
+        # this must correspond with installation configuration
+        # see deployment/install/speedtest.install.ini, section 'GENERAL', option 'short-name'
+        return 'speedtest'
 
 
 if __name__ == '__main__':

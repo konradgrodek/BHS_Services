@@ -1,8 +1,9 @@
 import serial
 import struct
+import time
 
 from gpiozero import DigitalOutputDevice
-
+from datetime import datetime
 
 class AirQualityMeasurement:
     def __init__(self, pm_2_5: int, pm_10: int):
@@ -79,3 +80,65 @@ class AirQualityDevice:
 class AirQualityMeasurementException(Exception):
     def __init__(self, msg):
         Exception.__init__(msg)
+
+
+class DistanceMeterDevice:
+    """
+    Facilitates distance measure made utilizing sensor ME007YS
+    """
+
+    def __init__(self):
+        """
+        Initializes the serial device
+        """
+        self._device = serial.Serial("/dev/ttyAMA0", 9600)
+
+    def measure(self) -> int:
+        """
+        Gets result of last measurement.
+        :return: the distance in millimeters
+        :raises: DistanceMeasureException in case of communication issues
+        """
+        if self._device.isOpen():
+            # wait for device if there is anything to be read
+            mark = datetime.now()
+            while self._device.inWaiting() == 0:
+                time.sleep(0.1)
+                if (datetime.now() - mark).total_seconds() > 1.0:
+                    raise DistanceMeasureException('timeout occurred while waiting for anything to be read')
+
+            data = []
+            i = 0
+            while self._device.inWaiting() > 0:
+                data.append(ord(self._device.read()))
+                i += 1
+                if data[0] != 0xff:
+                    i = 0
+                    data = []
+                if i == 4:
+                    break
+            self._device.read(self._device.inWaiting())
+            if i == 4:
+                sum = (data[0] + data[1] + data[2]) & 0x00ff
+                if sum != data[3]:
+                    raise DistanceMeasureException(f'checksum error, got {sum}, '
+                                           f'expected {data[3]} '
+                                           f'data: [{data[0]}]-[{data[1]}]-[{data[2]}]-[{data[3]}]')
+                else:
+                    measurement = data[1] * 256 + data[2]
+            else:
+                raise DistanceMeasureException(f'Data error, number of read bytes is {i}, read bytes: {data}')
+
+        else:
+            raise DistanceMeasureException('device is not open')
+        return measurement
+
+
+class DistanceMeasureException(BaseException):
+    def __init__(self, msg: str):
+        self.message = msg
+
+    def __str__(self):
+        return f'Fatal error occurred while reading state of UART device: {self.message}'
+
+

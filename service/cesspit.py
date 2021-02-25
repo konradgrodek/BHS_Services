@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 
-from serial import Serial
 import time
 from mariadb import OperationalError
 from gpiozero import LED
@@ -9,6 +8,7 @@ from scipy import stats
 
 from service.common import Service, ServiceRunner
 from persistence.schema import *
+from device.dev_serial import DistanceMeasureException, DistanceMeterDevice
 
 
 class LedSignal:
@@ -52,12 +52,16 @@ class LedSignal:
 
 
 class TankLevelService(Service):
+    """
+    In future this class must be adapted to host both tank levels: cesspit and rain-water level
+    It will be then subclassed and common functionality extracted to separate file
+    """
     def __init__(self):
         Service.__init__(self)
 
         self.the_cesspit_sensor: Sensor = None
         self.the_last_cesspit_reading: TankLevel = None
-        self.device: Serial = None
+        self.device: DistanceMeterDevice = None
 
         tank_level_section = 'TANKLEVEL'
 
@@ -74,6 +78,7 @@ class TankLevelService(Service):
         self.store_results_if_decreased_by = self.configuration.getIntConfigValue(
             section=tank_level_section,
             parameter='significant-level-decrease', default=1000)
+        self.failure_if_increased_by = self.store_results_if_decreased_by
         self.tank_empty_level = self.configuration.getIntConfigValue(
             section=tank_level_section,
             parameter='tank-empty-level', default=2000)
@@ -112,7 +117,7 @@ class TankLevelService(Service):
         pass
 
     def provideName(self):
-        return 'BHS.Cesspit'
+        return 'cesspit'
 
     def _get_cesspit_sensor(self) -> Sensor:
         if not self.the_cesspit_sensor:
@@ -165,46 +170,12 @@ class TankLevelService(Service):
 
     def _get_device(self):
         if not self.device:
-            self.device = Serial("/dev/ttyAMA0", 9600)
-            # self.device.setRTS(1)
+            self.device = DistanceMeterDevice()
 
         return self.device
 
     def _measure(self) -> int:
-        _device = self._get_device()
-        if _device.isOpen():
-            # wait for device if there is anything to be read
-            mark = datetime.now()
-            while _device.inWaiting() == 0:
-                time.sleep(0.1)
-                if (datetime.now() - mark).total_seconds() > 1.0:
-                    raise MeasureException('timeout occurred while waiting for anything to be read')
-
-            data = []
-            i = 0
-            while _device.inWaiting() > 0:
-                data.append(ord(_device.read()))
-                i += 1
-                if data[0] != 0xff:
-                    i = 0
-                    data = []
-                if i == 4:
-                    break
-            _device.read(_device.inWaiting())
-            if i == 4:
-                sum = (data[0] + data[1] + data[2]) & 0x00ff
-                if sum != data[3]:
-                    raise MeasureException(f'checksum error, got {sum}, '
-                                           f'expected {data[3]} '
-                                           f'data: [{data[0]}]-[{data[1]}]-[{data[2]}]-[{data[3]}]')
-                else:
-                    measurement = data[1] * 256 + data[2]
-            else:
-                raise MeasureException(f'Data error, number of read bytes is {i}, read bytes: {data}')
-
-        else:
-            raise MeasureException('device is not open')
-        return measurement
+        return self._get_device().measure()
 
     def _get_fill_percentage(self, level=None):
         if not level:
@@ -225,7 +196,7 @@ class TankLevelService(Service):
             try:
                 attempt += 1
                 measurements.append(self._measure())
-            except MeasureException as exception:
+            except DistanceMeasureException as exception:
                 self.log.critical(f'Unsuccessful {attempt} attempt to measure, got: {str(exception)}')
             if self.measure_attempts_pause_time > 0:
                 time.sleep(self.measure_attempts_pause_time)
@@ -250,7 +221,13 @@ class TankLevelService(Service):
                     # don't be misled here: "increase" means that new reading is smaller
                     # (distance is decreasing, but level is increasing)
 
-                self._react_on_level(self._get_fill_percentage())
+                # react with failure if the level increased significantly (this is the same level as for decrease)
+                # reset after two days
+                elif last_reading and measurements_mode - last_reading.level > self.failure_if_increased_by\
+                        and (datetime.now() - last_reading.timestamp).total_seconds()/60 < 24 * 2:
+                    self._react_on_failure()
+                else:
+                    self._react_on_level(self._get_fill_percentage())
             except OperationalError:
                 self._react_on_failure()
         else:
@@ -273,14 +250,6 @@ class TankLevelService(Service):
 
     def _react_on_failure(self):
         self.led_signal.blue_blink()
-
-
-class MeasureException(BaseException):
-    def __init__(self, msg: str):
-        self.message = msg
-
-    def __str__(self):
-        return f'Fatal error occurred while reading state of UART device: {self.message}'
 
 
 if __name__ == '__main__':

@@ -1,12 +1,13 @@
 #
 # This file contains common functionality for Black House Sentry project
 #
-from configparser import ConfigParser
+from configparser import ConfigParser, ExtendedInterpolation
 import logging
 from threading import Event
 import signal
 import subprocess
 import sys
+import os.path
 from gpiozero import Button
 from datetime import datetime, timezone, time
 from flask import Flask, jsonify
@@ -23,6 +24,7 @@ class Configuration:
     """Class being main point accessing the configuration"""
     ROOT = '/etc/bhs'
     EXT = '.ini'
+    ENV = 'env.ini'
 
     SECTION_DB = 'DATABASE'
     SECTION_LOG = 'LOG'
@@ -41,15 +43,16 @@ class Configuration:
 
     def __init__(self, name: str):
         """Initializes the configuration. Parameter `name` is mandatory as it is used to find the configuration file"""
-        self.configPath = self.ROOT + '/' + name + self.EXT
-        self.configParser = None
+        self.service_config_path = os.path.join(self.ROOT, name, name + self.EXT)
+        self.environment_config_path = os.path.join(self.ROOT, name, self.ENV)
+        self.config_parser = None
 
     def _getConfig(self):
-        if self.configParser is None:
-            self.configParser = ConfigParser()
-            self.configParser.read(self.configPath)
+        if self.config_parser is None:
+            self.config_parser = ConfigParser(interpolation=ExtendedInterpolation())
+            self.config_parser.read([self.environment_config_path, self.service_config_path])
 
-        return self.configParser
+        return self.config_parser
 
     def getConfigValue(self, section: str, parameter: str, default=None):
         if not self._getConfig().has_section(section):
@@ -111,7 +114,8 @@ class LocalConfiguration(Configuration):
     """To be used only for debugging purposes"""
     def __init__(self, localConfigFile: str):
         Configuration.__init__(self, '')
-        self.configPath = localConfigFile
+        self.service_config_path = localConfigFile
+        self.environment_config_path = '../deployment/install/.credentials'
 
 
 class RestServer(Thread):
@@ -143,7 +147,7 @@ class Service:
         if sys.gettrace() is None:
             self.configuration = Configuration(self.provideName())
         else:
-            self.configuration = LocalConfiguration('./Test/test.config.ini')
+            self.configuration = LocalConfiguration(f'../test/test.{self.provideName()}.ini')
 
         logging.basicConfig(
             filename=self.configuration.getLogFile(),
