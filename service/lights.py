@@ -2,9 +2,11 @@
 
 from gpiozero import LED, OutputDevice
 from logging import Logger
-import time
+from time import sleep
 
 from service.common import *
+from core.util import SunsetCalculator
+from device.buttons import StatelessButton
 
 
 class Outputs:
@@ -193,35 +195,35 @@ class On(IlluminationState):
         if self.spruce_on and self.oak_sides_on and self.oak_middle_on:
             self.log.debug(f'Signal: {self.outputs.led.pin} BLINK (n=1)')
             self.outputs.led.blink(on_time=0.2, off_time=0.2, n=1, background=False)
-            time.sleep(0.2)
+            sleep(0.2)
             self.outputs.led.on()
 
         # 011 OAK
         elif not self.spruce_on and self.oak_sides_on and self.oak_middle_on:
             self.log.debug(f'Signal: {self.outputs.led.pin} BLINK (n=2)')
             self.outputs.led.blink(on_time=0.2, off_time=0.2, n=2, background=False)
-            time.sleep(0.2)
+            sleep(0.2)
             self.outputs.led.on()
 
         # 001 OAK-SIDES
         elif not self.spruce_on and not self.oak_sides_on and self.oak_middle_on:
             self.log.debug(f'Signal: {self.outputs.led.pin} BLINK (n=3)')
             self.outputs.led.blink(on_time=0.2, off_time=0.2, n=3, background=False)
-            time.sleep(0.2)
+            sleep(0.2)
             self.outputs.led.on()
 
         # 010 OAK-MIDDLE
         elif not self.spruce_on and self.oak_sides_on and not self.oak_middle_on:
             self.log.debug(f'Signal: {self.outputs.led.pin} BLINK (n=4)')
             self.outputs.led.blink(on_time=0.2, off_time=0.2, n=4, background=False)
-            time.sleep(0.2)
+            sleep(0.2)
             self.outputs.led.on()
 
         # 100 SPRUCE
         elif self.spruce_on and not self.oak_sides_on and not self.oak_middle_on:
             self.log.debug(f'Signal: {self.outputs.led.pin} BLINK (n=5)')
             self.outputs.led.off()
-            time.sleep(0.2)
+            sleep(0.2)
             self.outputs.led.blink(on_time=0.2, off_time=0.2, n=5, background=False)
             self.outputs.led.on()
 
@@ -301,9 +303,9 @@ class LightsControllerServiceThread(Thread):
     """
     Class managing the process of executing flow of turning on and off the lights
     """
-    def __init__(self, exit_event: Event, outputs: Outputs, log: Logger, default_duration_seconds: int):
+    def __init__(self, outputs: Outputs, log: Logger, default_duration_seconds: int):
         Thread.__init__(self)
-        self._exit_event = exit_event
+        self._exit_event = ExitEvent()
         self._self_exit_event = Event()
         self.current_state = Off(outputs, log, default_duration_seconds)
 
@@ -329,7 +331,7 @@ class LightsControllerServiceThread(Thread):
 
 class LightsControllerService(Service):
     def provideName(self) -> str:
-        return "BHS.LightsController"
+        return "lights"
 
     def __init__(self):
         Service.__init__(self)
@@ -380,8 +382,7 @@ class LightsControllerService(Service):
 
         self.outputs = Outputs(pin_light_spruce, pin_light_oak_middle, pin_light_oak_sides, pin_signal_led)
         self.button = StatelessButton(pin_button, self.button_pressed)
-        self._thread = LightsControllerServiceThread(self._exit_event, self.outputs, self.log,
-                                                     self.default_duration_seconds)
+        self._thread = LightsControllerServiceThread(self.outputs, self.log, self.default_duration_seconds)
         self.rest_app.add_url_rule('/', 'current_state', self.get_current_state_for_rest)
         self.rest_app.add_url_rule('/on', 'light', self.turn_em_on_via_rest)
         self.rest_app.add_url_rule('/off', 'darkness', self.turn_em_off_via_rest)

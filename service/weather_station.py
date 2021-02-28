@@ -210,7 +210,7 @@ class WeatherStationService(Service):
         pass
 
     def provideName(self):
-        return 'BHS.WeatherStation'
+        return 'weather_station'
 
     def measure_air_quality(self):
         """

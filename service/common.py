@@ -3,21 +3,18 @@
 #
 from configparser import ConfigParser, ExtendedInterpolation
 import logging
-from threading import Event
 import signal
 import subprocess
 import sys
 import os.path
-from gpiozero import Button
-from datetime import datetime, timezone, time
+from datetime import time
 from flask import Flask, jsonify
 
 from werkzeug.serving import make_server
 from threading import Thread
-import math
 
 from core.bean import *
-from persistence.schema import Persistence
+from persistence.schema import *
 
 
 class Configuration:
@@ -135,15 +132,21 @@ class RestServer(Thread):
         self.server.shutdown()
 
 
+class ExitEvent(Event):
+    _instance = None
+
+    def __new__(cls):
+        if not cls._instance:
+            cls._instance = Event()
+        return cls._instance
+
+
 class Service:
     """
     Base class for all Black House Sentry services
     """
 
     def __init__(self):
-        """Initializes the object responsible for running BHS service"""
-        self._exit_event = Event()
-
         if sys.gettrace() is None:
             self.configuration = Configuration(self.provideName())
         else:
@@ -159,14 +162,15 @@ class Service:
         if self.configuration.getLogToStdout():
             self.log.addHandler(logging.StreamHandler(sys.stdout))
         self.persistence = Persistence(
-            self.configuration.getDb(),
-            self.configuration.getDbUser(),
-            self.configuration.getDbPassword(),
-            self.configuration.getDbHost())
+            db=self.configuration.getDb(),
+            user=self.configuration.getDbUser(),
+            password=self.configuration.getDbPassword(),
+            host=self.configuration.getDbHost(),
+            exit_event=ExitEvent())
         self._hostname = None
         port = self.configuration.getRestPort()
         if port > 0:
-            self.rest_app = Flask('BHSCore')
+            self.rest_app = Flask('service/common')
             self.rest_server = RestServer(port, self.rest_app)
         else:
             self.rest_server = None
@@ -183,20 +187,20 @@ class Service:
             self.rest_server.start()
             self.log.info(f'REST Service started @ {self.configuration.getRestPort()}')
 
-        while not self._exit_event.is_set():
+        while not ExitEvent().is_set():
             wait_time = self.main()
             if wait_time and wait_time > 0:
                 try:
-                    self._exit_event.wait(wait_time)
+                    ExitEvent().wait(wait_time)
                 except KeyboardInterrupt:  # this is just for proper handling of stop in debug mode
-                    self._exit_event.set()
+                    ExitEvent().set()
 
         self._cleanup()
         self.log.info('All done. Bye')
 
     def _onsigterm(self, signum, stackframe):
         self.log.critical('Received SIGTERM, terminating. Signum: %i, stractframe: %s', signum, str(stackframe))
-        self._exit_event.set()
+        ExitEvent().set()
 
     def _cleanup(self):
         self.persistence.close()
@@ -237,13 +241,6 @@ class Service:
 
         return self._hostname
 
-    def exit_event(self) -> Event:
-        """
-        Ensures access to event signalising the process should be ended
-        :return: Event, which can be monitored to detect service shut down
-        """
-        return self._exit_event
-
     def jsonify(self, to_jsonify):
         """
         Utility method converting json-ready-bean into correct Flask response.
@@ -271,6 +268,7 @@ class ServiceRunner:
     def run(self):
         try:
             self.service = self.service_class()
+
         except:
             logging.getLogger().critical(
                 f'Uncaught exception detected when creating instance of service {str(self.service_class)}. '
@@ -281,116 +279,31 @@ class ServiceRunner:
 
         try:
             self.service.run()
+
+        except DatabaseNotAvailableError as exc:
+            # in order to properly close, shutdown REST service and ensure the exit event is set
+            if self.service.rest_server:
+                self.service.rest_server.shutdown()
+
+            eevent = ExitEvent()
+            if not eevent.is_set():
+                eevent.set()
+
+            logging.getLogger().critical(
+                f'As the database is not available at the moment, the service is turning down. '
+                f'Details: {str(exc)}', exc)
+
+        except DatabaseOperationAborted as exc:
+            logging.getLogger().info(
+                f'The database operation was aborted due to received exit event. '
+                f'Details: {str(exc)}')
+
         except:
-            self.service.log.critical(
-                f'Uncaught exception detected when running service', sys.exc_info())
-            print(str(sys.exc_info()))
-            sys.stderr.write(str(sys.exc_info()))
-            exit()
-
-
-class StatelessButton(Button):
-    """
-    Simple class handling button with no state - the one that is on when you press it,
-    but released immediately switches off
-    The value added of the class is to report the duration of the press-release activity
-    """
-    def __init__(self, pin, button_pressed_handler):
-        Button.__init__(self, pin, pull_up=None, active_state=False)
-        self.when_activated = self.pressed
-        self.when_deactivated = self.released
-        self.pressed_at = None
-        self.button_pressed_handler = button_pressed_handler
-
-    def __str__(self):
-        return f"Stateless button configured @ {self.pin}"
-
-    def pressed(self, arg):
-        """
-        Reaction on button pressed
-        :param arg:
-        :return:
-        """
-        self.pressed_at = datetime.now()
-
-    def released(self, arg):
-        """
-        Reaction on button being released
-        :param arg:
-        :return:
-        """
-        duration = (datetime.now() - self.pressed_at).total_seconds()
-        self.button_pressed_handler(duration)
-        self.pressed_at = None
-
-
-class SunsetCalculator:
-    """
-    Utility class for calculating sunset and sunrise times
-
-    Source of calculations: https://www.esrl.noaa.gov/gmd/grad/solcalc/solareqns.PDF
-    """
-    def __init__(self, dt: datetime = None):
-        """
-        Constructor. Already pre-calculates most of the useful information
-        :param dt: the date for which the calculations must be performed
-        """
-        self.calculate_for_date = dt if dt else datetime.now()
-        self.day_of_year = (self.calculate_for_date - datetime(self.calculate_for_date.year, 1, 1)).days
-        # used by equation of time; actually no idea what to put in here; mid-day seems to be reasonable compromise
-        hour = 12
-        # constant unless the house will be moved or the BHS system will become worldwide standard
-        self.lattitude_deg = 49.993906
-        self.longitude_deg = 19.96859
-
-        # originally: gamma
-        fractional_year = 2*math.pi*(self.day_of_year-1+(hour-12)/24)/365
-
-        declination_angle = 0.006918-0.399912*math.cos(fractional_year)\
-                            + 0.070257*math.sin(fractional_year) \
-                            - 0.006758*math.cos(2*fractional_year) \
-                            + 0.000907*math.sin(2*fractional_year) \
-                            - 0.002697*math.cos(3*fractional_year) \
-                            + 0.00148*math.sin(3*fractional_year)
-
-        equation_of_time = 229.18 * (0.000075 + 0.001868 * math.cos(fractional_year)
-                                     - 0.032077 * math.sin(fractional_year)
-                                     - 0.014615 * math.cos(2 * fractional_year)
-                                     - 0.040849 * math.sin(2 * fractional_year))
-
-        hour_angle_deg = math.degrees(
-            math.acos(
-                (math.cos(math.radians(90.833))/(math.cos(math.radians(self.lattitude_deg)) * math.cos(declination_angle)))
-                - math.tan(math.radians(self.lattitude_deg))*math.tan(declination_angle)))
-
-        self.sunset_min = 720 - 4 * (self.longitude_deg - hour_angle_deg) - equation_of_time
-        self.sunrise_min = 720 - 4 * (self.longitude_deg + hour_angle_deg) - equation_of_time
-
-    def _as_utc(self, mins: float) -> datetime:
-        return self.calculate_for_date\
-            .astimezone(tz=timezone.utc)\
-            .replace(year=self.calculate_for_date.year,
-                     month=self.calculate_for_date.month,
-                     day=self.calculate_for_date.day,
-                     hour=int(mins/60),
-                     minute=int(mins % 60),
-                     second=int((mins-int(mins))*60),
-                     microsecond=0)
-
-    def _sunrise_utc(self) -> datetime:
-        return self._as_utc(mins=self.sunrise_min)
-
-    def _sunset_utc(self) -> datetime:
-        return self._as_utc(mins=self.sunset_min)
-
-    def _convert_to_cest(self, utc: datetime):
-        return utc.astimezone().replace(tzinfo=None)
-
-    def sunset(self) -> datetime:
-        return self._convert_to_cest(self._sunset_utc())
-
-    def sunrise(self) -> datetime:
-        return self._convert_to_cest(self._sunrise_utc())
+                self.service.log.critical(
+                    f'Uncaught exception detected when running service', sys.exc_info())
+                print(str(sys.exc_info()))
+                sys.stderr.write(str(sys.exc_info()))
+                exit()
 
 #
 # if __name__ == '__main__':

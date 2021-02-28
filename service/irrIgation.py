@@ -303,7 +303,7 @@ class IrrigationServiceThread(Thread):
 
 class IrrigationService(Service):
     def provideName(self) -> str:
-        return "BHS.Irrigation"
+        return "irrigation"
 
     def __init__(self):
         Service.__init__(self)

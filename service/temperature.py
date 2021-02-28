@@ -43,6 +43,7 @@ class TemperatureService(Service):
         self.internal_temp_readings_sum = 0.0
         self.internal_temp_readings_count = 0
         self.last_stored_temperature_readings = {}
+        self.current_temperature_readings = {}
 
         temperature_section = 'TEMPERATURE'
         # read some configuration
@@ -71,9 +72,11 @@ class TemperatureService(Service):
             parameter='default-polling-period-internal-temp',
             default=4*60*60)
 
-        self.rest_app.add_url_rule('/', 'last_temperature',
+        self.rest_app.add_url_rule('/', 'current_temperature',
+                                   self.get_rest_response_current_temperature_readings)
+        self.rest_app.add_url_rule('/last', 'last_temperature',
                                    self.get_rest_response_last_temperature_readings)
-        self.rest_app.add_url_rule('/current', 'current_temperature',
+        self.rest_app.add_url_rule('/realtime', 'realtime_temperature',
                                    self.get_rest_response_realtime_temperature_readings)
 
         self.reading_lock = Lock()
@@ -94,7 +97,7 @@ class TemperatureService(Service):
         pass
 
     def provideName(self):
-        return 'BHS.Temperature'
+        return 'temperature'
 
     def read_and_store_temperature(self):
         self.reading_lock.acquire()
@@ -102,20 +105,21 @@ class TemperatureService(Service):
         readings = self.get_readings()
         reporting_sensors_refnos = list()
 
-        for reading in readings:
-            sensor = self.get_sensor_for_reading(reading)
+        for _reading in readings:
+            sensor = self.get_sensor_for_reading(_reading)
+            self.current_temperature_readings[_reading.reference] = _reading
 
             if sensor and sensor.host != self.get_hostname():
                 self.log.info(f"Sensor id: {sensor.db_id}, refno: {sensor.reference} "
                               f"is updated with host name ({sensor.host} --> {self.get_hostname()})")
                 self.persistence.update_host(sensor, self.get_hostname())
 
-            if reading.succeeded:
-                reporting_sensors_refnos.append(reading.reference)
+            if _reading.succeeded:
+                reporting_sensors_refnos.append(_reading.reference)
                 if not sensor:
                     self.log.info(f'Found new temperature sensor. '
-                                  f'Host: {self.get_hostname()}, reference: {reading.reference}')
-                    sensor = self.register_new_sensor(reading.reference)
+                                  f'Host: {self.get_hostname()}, reference: {_reading.reference}')
+                    sensor = self.register_new_sensor(_reading.reference)
                     self.log.info(f'Inserted new sensor: {str(sensor)}')
 
                 if not sensor.is_active:
@@ -125,9 +129,9 @@ class TemperatureService(Service):
 
                 last_reading = self.get_last_temperature_reading(sensor)
 
-                if reading.is_internal:
+                if _reading.is_internal:
                     if not last_reading:
-                        self.add_temperature_reading(sensor, reading.temperature, reading.timestamp)
+                        self.add_temperature_reading(sensor, _reading.temperature, _reading.timestamp)
                         self.internal_temp_readings_sum = 0.0
                         self.internal_temp_readings_count = 0
                     else:
@@ -135,13 +139,13 @@ class TemperatureService(Service):
                             if sensor.polling_period else self.polling_period_internal_temp
 
                         if (datetime.now() - last_reading.timestamp).total_seconds() > polling_period:
-                            if abs(reading.temperature - last_reading.temperature) > self.significant_difference:
-                                self.add_temperature_reading(sensor, reading.temperature, reading.timestamp)
+                            if abs(_reading.temperature - last_reading.temperature) > self.significant_difference:
+                                self.add_temperature_reading(sensor, _reading.temperature, _reading.timestamp)
                             self.internal_temp_readings_sum = 0.0
                             self.internal_temp_readings_count = 0
                 elif not last_reading \
-                        or abs(reading.temperature - last_reading.temperature) > self.significant_difference:
-                    self.add_temperature_reading(sensor, reading.temperature, reading.timestamp)
+                        or abs(_reading.temperature - last_reading.temperature) > self.significant_difference:
+                    self.add_temperature_reading(sensor, _reading.temperature, _reading.timestamp)
 
             else:  # reading unsuccessful
                 if sensor and sensor.is_active:
@@ -166,11 +170,39 @@ class TemperatureService(Service):
                 self.log.info(str(_sensor))
         return self.sensors
 
+    def get_local_sensors(self, refresh_cache: bool = False):
+        return filter(lambda _s: _s.host == self.get_hostname(), self.get_sensors(refresh_cache))
+
     def get_last_temperature_reading(self, _sensor: Sensor):
+        """
+        Returns last stored in the database reading. Instead of querying the database, uses the cached value (the cache
+        is not available after the service restart, before the first reading is stored).
+        Important note: the reading is stored in the database if it is significantly different that the last one.
+        Therefore, in order to have up-to-date, accurrate reading, use method get_current_temperature_reading
+        :param _sensor: the sensor of interest
+        :return: last stored reading from the sensor
+        """
         from_cache = self.last_stored_temperature_readings.get(_sensor.reference)
         return from_cache if from_cache else self.persistence.get_last_temperature_reading(_sensor)
 
+    def get_current_temperature_reading(self, _sensor: Sensor):
+        """
+        Returns the current (most recent) reading of temperature. If there is no such reading (at the very beginning of
+        the start of the process), the last stored reading is returned.
+        :param _sensor: the sensor of interest
+        :return: most up-to-date reading from the sensor
+        """
+        current = self.current_temperature_readings.get(_sensor.reference)
+        return current if current else self.persistence.get_last_temperature_reading(_sensor)
+
     def add_temperature_reading(self, _sensor: Sensor, temperature: float, timestamp: datetime):
+        """
+        Stores the temperature reading in the database
+        :param _sensor: the sensort reporting the temperature
+        :param temperature: the temperature in Celsius degrees
+        :param timestamp: the exact time of measurement
+        :return: None
+        """
         self.last_stored_temperature_readings[_sensor.reference] = \
             self.persistence.add_temperature_reading(_sensor, temperature, timestamp)
         self.log.info(f'Inserted new reading: {str(self.last_stored_temperature_readings[_sensor.reference])} '
@@ -184,6 +216,10 @@ class TemperatureService(Service):
         self.persistence.disable_sensor(_sensor)
 
     def get_readings(self):
+        """
+        Queries one-wire interface for readings from all available devices
+        :return:
+        """
         readings = list()
         device_dirs = glob.glob(DEVICES_BASEDIR + '28*')
 
@@ -317,14 +353,22 @@ class TemperatureService(Service):
         return hrn if hrn else sensor_reference
 
     def get_rest_response_last_temperature_readings(self):
+        """
+        REST interface: returns temperature last stored in the database for all sensors active in this instance
+        :return:
+        """
         return self.jsonify([TemperatureReadingJson(
             temperature=self.get_last_temperature_reading(_sensor).temperature,
             timestamp=self.get_last_temperature_reading(_sensor).timestamp,
             sensor_location=_sensor.location,
             sensor_reference=_sensor.reference)
-            for _sensor in self.get_sensors()])
+            for _sensor in self.get_local_sensors()])
 
     def get_rest_response_realtime_temperature_readings(self):
+        """
+        Performs the reading and returns the real-time measurement. Takes long time, but returns real-time value.
+        :return: jsonified reading
+        """
         if self.reading_lock.locked():
             self.reading_lock.acquire()
             self.reading_lock.release()
@@ -332,6 +376,19 @@ class TemperatureService(Service):
             self.read_and_store_temperature()
 
         return self.get_rest_response_last_temperature_readings()
+
+    def get_rest_response_current_temperature_readings(self):
+        """
+        Returns result of last measurement. It compromises between accuracy of the reading (the result is not limited
+        by "significant difference") and its speed (there is no measurement done, so it returns immediately)
+        :return: the readings in JSON form
+        """
+        return self.jsonify([TemperatureReadingJson(
+            temperature=self.get_current_temperature_reading(_sensor).temperature,
+            timestamp=self.get_current_temperature_reading(_sensor).timestamp,
+            sensor_location=_sensor.location,
+            sensor_reference=_sensor.reference)
+            for _sensor in self.get_local_sensors()])
 
 
 if __name__ == '__main__':

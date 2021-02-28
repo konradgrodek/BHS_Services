@@ -63,15 +63,16 @@ class CommandlineConfig:
         """
         Initializes the configuration from sys.argv
         """
-        if len(sys.argv) < 2:
-            # interactive mode
-            self.config_file = input('Enter configuration file, or just try the service short name > ')
-        else:
-            self.config_file = sys.argv[1]
-
         self.dbtest_mode = False
         self.install = True
         self.start_immediately = False
+
+        if len(sys.argv) < 2:
+            # interactive mode
+            self.config_file = input('Enter configuration file, or just try the service short name > ')
+            self.dbtest_mode = input('Test database? (Y/N) > ') == 'Y'
+        else:
+            self.config_file = sys.argv[1]
 
         for arg in sys.argv[2:]:
             if arg == CommandlineConfig.DBTEST:
@@ -506,7 +507,8 @@ class SystemdServiceCreator(SubprocessAction, ConfigParser):
 
 def init_logging(cmdline: CommandlineConfig) -> logging.Logger:
     logging.basicConfig(
-        filename=f'{datetime.today().strftime("%Y%m%d%H%M%S")}_{cmdline.install_config_file_name}.log',
+        filename=os.path.join('x_log',
+                           f'{datetime.today().strftime("%Y%m%d%H%M%S")}_{cmdline.install_config_file_name}.log'),
         level=logging.DEBUG,
         format='%(asctime)s %(name)s %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
