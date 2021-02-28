@@ -5,6 +5,7 @@ from logging import Logger
 import time
 
 from service.common import *
+from device.buttons import StatelessButton
 
 
 class Outputs:
@@ -275,9 +276,9 @@ class IrrigationServiceThread(Thread):
     """
     Class representing for single
     """
-    def __init__(self, exit_event: Event, outputs: Outputs, log: Logger, irrigation_config: IrrigationConfiguration):
+    def __init__(self, outputs: Outputs, log: Logger, irrigation_config: IrrigationConfiguration):
         Thread.__init__(self)
-        self._exit_event = exit_event
+        self._exit_event = ExitEvent()
         self._self_exit_event = Event()
         self.current_state = IrrigationIdle(outputs, log, irrigation_config)
 
@@ -364,7 +365,7 @@ class IrrigationService(Service):
             section=irrigation_section,
             parameter='pin-button')
         self.button = StatelessButton(pin_button, self.button_pressed)
-        self._thread = IrrigationServiceThread(self._exit_event, self.outputs, self.log, self.irrigation_config)
+        self._thread = IrrigationServiceThread(self.outputs, self.log, self.irrigation_config)
 
     def main(self) -> float:
         """

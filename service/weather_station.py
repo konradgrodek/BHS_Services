@@ -3,12 +3,9 @@
 from array import array
 from scipy import stats
 from collections import deque
-from threading import Thread
-import subprocess
 import re
-import sys
 
-from service.common import Service, ServiceRunner
+from service.common import *
 from device.dev_i2c import *
 from device.dev_serial import *
 from device.dev_spi import *
@@ -223,7 +220,7 @@ class WeatherStationService(Service):
         self.log.debug('Air Quality Sensor is powered. Warming up')
 
         # warm up
-        self._exit_event.wait(self.air_quality_warmup_time_s)
+        ExitEvent().wait(self.air_quality_warmup_time_s)
 
         # mark start time
         time_mark = datetime.now()
@@ -239,7 +236,7 @@ class WeatherStationService(Service):
 
         self.log.debug('Measuring air quality')
 
-        while not self._exit_event.is_set() \
+        while not ExitEvent().is_set() \
                 and (datetime.now() - time_mark).total_seconds() < self.air_quality_measure_time_s:
             try:
                 result = self.air_quality_device.read_single()
@@ -465,7 +462,7 @@ class AbstractIntensityObserver(Thread):
         Once finished, the thread is dead and cannot be resumed.
         :return:
         """
-        while not self.parent_service.exit_event().is_set():
+        while not ExitEvent().is_set():
             measurement = self.measure()
 
             current_state = self.is_active(measurement)
@@ -485,7 +482,7 @@ class AbstractIntensityObserver(Thread):
 
             self.current_observations.append(measurement)
 
-            self.parent_service.exit_event().wait(self.sleep_time_between_measures_s)
+            ExitEvent().wait(self.sleep_time_between_measures_s)
 
     def measure(self) -> int:
         """
@@ -856,7 +853,7 @@ class MultisensorObserver(Thread):
             threshold_perc=0.05)
 
     def run(self):
-        while not self.parent_service.exit_event().is_set():
+        while not ExitEvent().is_set():
             temperature_observations = array('i')
             pressure_observations = array('i')
             humidity_observations = array('i')
@@ -867,7 +864,7 @@ class MultisensorObserver(Thread):
             self.parent_service.log.debug('Multisensor is up and measuring')
 
             try:
-                while not self.parent_service.exit_event().is_set() \
+                while not ExitEvent().is_set() \
                         and (datetime.now() - time_mark).total_seconds() < self.measure_pooling_period:
                     current = self.parent_service.multisensor_device.read(
                         timeout_seconds=self.sleep_time_between_measures_s)
@@ -876,7 +873,7 @@ class MultisensorObserver(Thread):
                     pressure_observations.append(current.pressure())
                     humidity_observations.append(int(current.humidity()))
 
-                    self.parent_service.exit_event().wait(self.sleep_time_between_measures_s)
+                    ExitEvent().wait(self.sleep_time_between_measures_s)
 
                 self.current_reading = MultisensorReading(
                     temperature=float(stats.mode(temperature_observations, nan_policy='omit').mode[0] / 10),
@@ -891,7 +888,7 @@ class MultisensorObserver(Thread):
             except MultisensorReadingException as e:
                 self.parent_service.log.critical(f'Multisenor malfunctioned. Details: {str(e)}')
 
-            self.parent_service.exit_event().wait(self.measure_pooling_period)
+            ExitEvent().wait(self.measure_pooling_period)
 
     def get_temperature_reading(self) -> AbstractJsonBean:
         if not self.is_alive():
@@ -961,7 +958,7 @@ class RPiCoolDown(Thread):
         self.measure_temp_output_re_pattern = re.compile('temp=(\\d+\\.\\d*).*')
 
     def run(self):
-        while not self.parent_service.exit_event().is_set():
+        while not ExitEvent().is_set():
             exec_res = subprocess.run([self.COMMAND_VCGENCMD, self.COMMAND_MEASURETEMP], capture_output=True)
 
             exec_stdout = exec_res.stdout.decode('utf-8')
@@ -991,7 +988,7 @@ class RPiCoolDown(Thread):
                 self.parent_service.log.error(f'Internal temperature measure failed. Stdout: [{exec_stdout}]. '
                                               f'Stderr: [{exec_res.stderr.decode("utf-8")}]')
 
-            self.parent_service.exit_event().wait(self.probing_period)
+            ExitEvent().wait(self.probing_period)
 
 
 if __name__ == '__main__':
