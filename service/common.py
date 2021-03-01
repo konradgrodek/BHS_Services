@@ -290,20 +290,18 @@ class ServiceRunner:
                 eevent.set()
 
             logging.getLogger().critical(
-                f'As the database is not available at the moment, the service is turning down. '
-                f'Details: {str(exc)}', exc)
+                f'As the database is not available at the moment, the service is turning down', exc)
 
         except DatabaseOperationAborted as exc:
             logging.getLogger().info(
-                f'The database operation was aborted due to received exit event. '
-                f'Details: {str(exc)}')
+                f'The database operation was aborted due to received exit event')
 
         except:
-                self.service.log.critical(
-                    f'Uncaught exception detected when running service', sys.exc_info())
-                print(str(sys.exc_info()))
-                sys.stderr.write(str(sys.exc_info()))
-                exit()
+            self.service.log.critical(
+                f'Uncaught exception detected when running service', sys.exc_info())
+            print(str(sys.exc_info()))
+            sys.stderr.write(str(sys.exc_info()))
+            exit()
 
 #
 # if __name__ == '__main__':
