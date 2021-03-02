@@ -1,12 +1,11 @@
 #!/usr/bin/python3
 
-import time
 from mariadb import OperationalError
 from gpiozero import LED
 from array import array
 from scipy import stats
 
-from service.common import Service, ServiceRunner
+from service.common import *
 from persistence.schema import *
 from device.dev_serial import DistanceMeasureException, DistanceMeterDevice
 
@@ -147,20 +146,10 @@ class TankLevelService(Service):
         return self.the_last_cesspit_reading
 
     def _add_cesspit_reading(self, level: int, retry_count: int = 0):
-        try:
-            self.the_last_cesspit_reading = self.persistence.add_tank_level(
-                self._get_cesspit_sensor(),
-                level,
-                datetime.now())
-        except OperationalError as err:
-            self.persistence.reconnect()
-            if retry_count < 10:
-                self.log.critical(f'An operational error occurred while storing level reading, '
-                                  f'details: {str(err)} [attempt: {retry_count+1}]')
-                time.sleep(1)
-                self._add_cesspit_reading(level, retry_count+1)
-            else:
-                raise err
+        self.the_last_cesspit_reading = self.persistence.add_tank_level(
+            self._get_cesspit_sensor(),
+            level,
+            datetime.now())
 
         self.log.info(f"New level reading added: {str(self.the_last_cesspit_reading)}")
 
@@ -192,14 +181,14 @@ class TankLevelService(Service):
         measurements = array('i')
 
         attempt = 0
-        while (datetime.now() - start_mark).total_seconds() < self.measure_duration and not self._exit_event.is_set():
+        while (datetime.now() - start_mark).total_seconds() < self.measure_duration and not ExitEvent().is_set():
             try:
                 attempt += 1
                 measurements.append(self._measure())
             except DistanceMeasureException as exception:
-                self.log.critical(f'Unsuccessful {attempt} attempt to measure, got: {str(exception)}')
+                self.log.critical(f'Unsuccessful {attempt} attempt to measure', exception)
             if self.measure_attempts_pause_time > 0:
-                time.sleep(self.measure_attempts_pause_time)
+                ExitEvent().wait(self.measure_attempts_pause_time)
 
         if len(measurements) > 0:
             measurements_mode = stats.mode(measurements, nan_policy='omit').mode[0]
@@ -228,7 +217,7 @@ class TankLevelService(Service):
                     self._react_on_failure()
                 else:
                     self._react_on_level(self._get_fill_percentage())
-            except OperationalError:
+            except (DatabaseOperationAborted, DatabaseNotAvailableError):
                 self._react_on_failure()
         else:
             self.log.critical(f"All attempts to measure the level failed")
