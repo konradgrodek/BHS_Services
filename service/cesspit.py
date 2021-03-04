@@ -197,7 +197,7 @@ class TankLevelService(Service):
                            f"of last {len(measurements)} readings")
             last_reading = self._get_last_cesspit_reading()
 
-            if not last_reading or last_reading.level - measurements_mode > 0.3:
+            if not last_reading and abs(last_reading.level - measurements_mode) > 0:
                 self.log.info(f'Current measure as most frequent one '
                               f'of last {len(measurements)} is {measurements_mode} [mm], '
                               f'{self._get_fill_percentage(measurements_mode):.4} [%]')
