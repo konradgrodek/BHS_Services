@@ -447,6 +447,7 @@ class AbstractIntensityObserver(Thread):
         self.parent_service = parent
         self.sleep_time_between_measures_s = sleep_time_between_measures_s
         self.is_observation_active = False
+        self.failure = False
         self.active_observations = array('i')
         self.active_observations_since: datetime = None
         self.current_observations = deque(maxlen=100)
@@ -464,6 +465,11 @@ class AbstractIntensityObserver(Thread):
         """
         while not ExitEvent().is_set():
             measurement = self.measure()
+
+            # it is assumed that 100% is not reachable, therefore indicates error
+            self.failure = measurement == 1000
+            if self.failure:
+                break
 
             current_state = self.is_active(measurement)
 
@@ -665,6 +671,9 @@ class LuminosityObserver(AbstractADCObserver):
         """
         if not self.is_alive():
             return ErrorJsonBean('Error occurred')
+
+        if self.failure:
+            return ErrorJsonBean('Reading is 100%, which is interpreted as failure')
 
         if len(self.current_observations) == 0:
             return NotAvailableJsonBean()
