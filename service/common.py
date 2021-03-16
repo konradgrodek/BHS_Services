@@ -112,7 +112,7 @@ class LocalConfiguration(Configuration):
     def __init__(self, localConfigFile: str):
         Configuration.__init__(self, '')
         self.service_config_path = localConfigFile
-        self.environment_config_path = '../deployment/install/.credentials'
+        self.environment_config_path = '../../BHS_Deployment/install/.credentials'
 
 
 class RestServer(Thread):
@@ -244,9 +244,9 @@ class Service:
     def jsonify(self, to_jsonify):
         """
         Utility method converting json-ready-bean into correct Flask response.
-        :param to_jsonify: the entity to be tranferred into Flask response.
+        :param to_jsonify: the entity to be transferred into Flask response.
         Acceptable types: (1) list of AbstractJsonBean (2) AbstractJsonBean (3) dict
-        None will also be accepted and transffered into 'not-available' response
+        None will also be accepted and transferred into 'not-available' response
         :return: jsonified object(s)
         """
         if type(to_jsonify) != dict:

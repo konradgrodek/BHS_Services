@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 
-from mariadb import OperationalError
 from gpiozero import LED
 from array import array
 from scipy import stats
@@ -59,7 +58,8 @@ class TankLevelService(Service):
         Service.__init__(self)
 
         self.the_cesspit_sensor: Sensor = None
-        self.the_last_cesspit_reading: TankLevel = None
+        self.the_last_stored_cesspit_reading: TankLevel = None
+        self.the_last_reliable_cesspit_reading: TankLevel = None
         self.device: DistanceMeterDevice = None
 
         tank_level_section = 'TANKLEVEL'
@@ -77,7 +77,13 @@ class TankLevelService(Service):
         self.store_results_if_decreased_by = self.configuration.getIntConfigValue(
             section=tank_level_section,
             parameter='significant-level-decrease', default=1000)
-        self.failure_if_increased_by = self.store_results_if_decreased_by
+        self.reliable_level_increase = self.configuration.getIntConfigValue(
+            section=tank_level_section,
+            parameter='reliable-level-increase', default=5)
+        self.reliable_level_increase_per_hour = self.configuration.getIntConfigValue(
+            section=tank_level_section,
+            parameter='reliable-level-increase-per-hour', default=20)
+
         self.tank_empty_level = self.configuration.getIntConfigValue(
             section=tank_level_section,
             parameter='tank-empty-level', default=2000)
@@ -110,6 +116,9 @@ class TankLevelService(Service):
                              f'{tank_level_section}.tank-fill-percentage-levels: <{signal_levels}>. '
                              f'Expected comma-separated list of four integers')
 
+        self.rest_app.add_url_rule('/', 'current',
+                                   self.get_rest_response_current_reading)
+
     def cleanup(self):
         """Override this method to react on SIGTERM"""
         self.log.debug('Nothing to clean')
@@ -135,23 +144,36 @@ class TankLevelService(Service):
 
         return self.the_cesspit_sensor
 
-    def _get_last_cesspit_reading(self) -> TankLevel:
-        if not self.the_last_cesspit_reading:
-            self.the_last_cesspit_reading = self.persistence.get_last_tank_level(self._get_cesspit_sensor())
-            if self.the_last_cesspit_reading:
-                self.log.info(f'Last cesspit level restored from the database: {str(self.the_last_cesspit_reading)}')
+    def _get_last_stored_cesspit_reading(self) -> TankLevel:
+        if not self.the_last_stored_cesspit_reading:
+            self.the_last_stored_cesspit_reading = self.persistence.get_last_tank_level(self._get_cesspit_sensor())
+            if self.the_last_stored_cesspit_reading:
+                self.log.info(f'Last cesspit level restored from the database: {str(self.the_last_stored_cesspit_reading)}')
             else:
                 self.log.info("Can't locate last reading of cesspit level")
 
-        return self.the_last_cesspit_reading
+        return self.the_last_stored_cesspit_reading
 
-    def _add_cesspit_reading(self, level: int, retry_count: int = 0):
-        self.the_last_cesspit_reading = self.persistence.add_tank_level(
+    def _get_last_reliable_cesspit_reading(self) -> TankLevel:
+        if not self.the_last_reliable_cesspit_reading:
+            self.the_last_reliable_cesspit_reading = self._get_last_stored_cesspit_reading()
+        return self.the_last_reliable_cesspit_reading
+
+    def _set_last_reliable_cesspit_reading(self, current_level: int):
+        self.the_last_reliable_cesspit_reading = TankLevel(
+            sensor=None,
+            db_id=None,
+            sensor_id=None,
+            level=current_level,
+            timestamp=datetime.now())
+
+    def _add_cesspit_reading(self, level: int):
+        self.the_last_stored_cesspit_reading = self.persistence.add_tank_level(
             self._get_cesspit_sensor(),
             level,
             datetime.now())
 
-        self.log.info(f"New level reading added: {str(self.the_last_cesspit_reading)}")
+        self.log.info(f"New level reading added: {str(self.the_last_stored_cesspit_reading)}")
 
     def _get_polling_period(self) -> int:
         pp = self._get_cesspit_sensor().polling_period
@@ -168,8 +190,8 @@ class TankLevelService(Service):
 
     def _get_fill_percentage(self, level=None):
         if not level:
-            level = self._get_last_cesspit_reading().level
-        return 100*(self.tank_empty_level-level)/(self.tank_empty_level-self.tank_full_level)
+            level = self._get_last_stored_cesspit_reading().level
+        return int(10000*(self.tank_empty_level-level)/(self.tank_empty_level-self.tank_full_level))/100
 
     def main(self) -> float:
         """
@@ -191,39 +213,77 @@ class TankLevelService(Service):
                 ExitEvent().wait(self.measure_attempts_pause_time)
 
         if len(measurements) > 0:
-            measurements_mode = stats.mode(measurements, nan_policy='omit').mode[0]
-            self.log.debug(f"Mode: {measurements_mode} [mm], "
-                           f"mean: {stats.tmean(measurements):.5} [mm] "
-                           f"of last {len(measurements)} readings")
-            last_reading = self._get_last_cesspit_reading()
+            # assumed the reading was successful in technical terms
+            # unfortunately the reading sometimes (quite often) can be invalid - unreliable
 
-            if not last_reading and abs(last_reading.level - measurements_mode) > 0:
-                self.log.info(f'Current measure as most frequent one '
-                              f'of last {len(measurements)} is {measurements_mode} [mm], '
-                              f'{self._get_fill_percentage(measurements_mode):.4} [%]')
+            current_level = int(stats.mode(measurements, nan_policy='omit').mode[0])
+            current_level_mean = stats.tmean(measurements)
 
-            try:
-                if not last_reading or last_reading.level - measurements_mode > self.store_results_if_increased_by \
-                        or measurements_mode - last_reading.level > self.store_results_if_decreased_by:
+            last_reliable_reading = self._get_last_reliable_cesspit_reading()
+            last_stored_reading = self._get_last_stored_cesspit_reading()
 
-                    self._add_cesspit_reading(int(measurements_mode))
-                    # don't be misled here: "increase" means that new reading is smaller
-                    # (distance is decreasing, but level is increasing)
+            if self._is_reliable(current_level, last_reliable_reading):
+                self.log.info(f'OK {len(measurements)} measurements, '
+                              f'mode: {current_level} [mm] ({self._get_fill_percentage(current_level):.2f} [%]), '
+                              f'mean: {current_level_mean:.2f}')
 
-                # react with failure if the level increased significantly (this is the same level as for decrease)
-                # reset after two days
-                elif last_reading and measurements_mode - last_reading.level > self.failure_if_increased_by\
-                        and (datetime.now() - last_reading.timestamp).total_seconds()/60 < 24 * 2:
-                    self._react_on_failure()
-                else:
-                    self._react_on_level(self._get_fill_percentage())
-            except (DatabaseOperationAborted, DatabaseNotAvailableError):
+                self._set_last_reliable_cesspit_reading(current_level)
+
+                if self._do_store_reading(current_level, last_stored_reading):
+                    self._add_cesspit_reading(current_level)
+
+                self._react_on_level(self._get_fill_percentage())
+
+            else:
+                speed = (last_reliable_reading.level - current_level) / \
+                        ((datetime.now() - last_reliable_reading.timestamp).total_seconds()/3600)
+                self.log.info(f'UNRELIABLE! {len(measurements)} measurements, '
+                              f'mode: {current_level} [mm] ({self._get_fill_percentage(current_level):.2f} [%]), '
+                              f'increase {last_reliable_reading.level - current_level} [mm],'
+                              f'mean: {current_level_mean:.2f}, '
+                              f'variance: {stats.variation(measurements):.2f}, '
+                              f'increase speed: {speed:.4f} [mmph]')
+                # signalize failure
                 self._react_on_failure()
+
         else:
             self.log.critical(f"All attempts to measure the level failed")
             self._react_on_failure()
 
         return self._get_polling_period() - (datetime.now()-start_mark).total_seconds()
+
+    @staticmethod
+    def _increase(current_level: int, previous_level: int):
+        """
+        Returns the volume of increase (if positive) or decrease (if negative) of tank level
+        :param current_level: the level just measured
+        :param previous_level: the previously measured level
+        :return: positive value for growing level, negative for level decrease
+        """
+        return previous_level - current_level
+
+    def _is_reliable(self, current_level: int, last_reliable_reading: TankLevel) -> bool:
+        # the decrease is always reliable
+        if not last_reliable_reading or self._increase(current_level, last_reliable_reading.level) <= 0:
+            return True
+
+        # the increase is reliable if it does not exceed reliable-level-increase
+        if self._increase(current_level, last_reliable_reading.level) < self.reliable_level_increase:
+            return True
+
+        # the increase is also reliable if the last reliable increase is in the past and the speed of increase
+        # does not exceed reliable-level-increase-per-day
+
+        return self._increase(current_level, last_reliable_reading.level) / \
+               (datetime.now() - last_reliable_reading.timestamp).total_seconds() \
+               < (self.reliable_level_increase_per_hour / (60 * 60))
+
+    def _do_store_reading(self, current_level: int, last_stored_reading: TankLevel) -> bool:
+        if not last_stored_reading:
+            return True
+
+        increase = self._increase(current_level, last_stored_reading.level)
+        return increase <= (-self.store_results_if_decreased_by) or increase >= self.store_results_if_increased_by
 
     def _react_on_level(self, fill_percentage):
         if fill_percentage < self.signal_thresholds[0]:
@@ -239,6 +299,13 @@ class TankLevelService(Service):
 
     def _react_on_failure(self):
         self.led_signal.blue_blink()
+
+    def get_rest_response_current_reading(self):
+        return self.jsonify(CesspitReadingJson(
+            level_mm=self._get_last_reliable_cesspit_reading().level,
+            fill_perc=self._get_fill_percentage(self._get_last_reliable_cesspit_reading().level),
+            timestamp=self._get_last_reliable_cesspit_reading().timestamp)
+        )
 
 
 if __name__ == '__main__':

@@ -1,5 +1,5 @@
 from flask import Flask, jsonify
-from BHSJsonBean import *
+from core.bean import *
 from datetime import datetime
 
 
