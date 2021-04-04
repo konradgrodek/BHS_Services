@@ -276,7 +276,7 @@ class TemperatureService(Service):
             self.log.error(f'Temperature reading failed. Error reading from IO: {sys.exc_info()}')
 
         if not success and retry_count < self.max_retry_count:
-            time.sleep(self.retry_delay)
+            ExitEvent().wait(self.retry_delay)
             return self.get_reading(device_dir, retry_count + 1)
 
         return SimpleTemperatureReading(success, sensor_reference, temp, datetime.now())
