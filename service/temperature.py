@@ -170,8 +170,8 @@ class TemperatureService(Service):
                 self.log.info(str(_sensor))
         return self.sensors
 
-    def get_local_sensors(self, refresh_cache: bool = False):
-        return filter(lambda _s: _s.host == self.get_hostname(), self.get_sensors(refresh_cache))
+    def get_local_active_sensors(self, refresh_cache: bool = False):
+        return filter(lambda _s: _s.host == self.get_hostname() and _s.is_active, self.get_sensors(refresh_cache))
 
     def get_last_temperature_reading(self, _sensor: Sensor):
         """
@@ -362,7 +362,7 @@ class TemperatureService(Service):
             timestamp=self.get_last_temperature_reading(_sensor).timestamp,
             sensor_location=_sensor.location,
             sensor_reference=_sensor.reference)
-            for _sensor in self.get_local_sensors()])
+            for _sensor in self.get_local_active_sensors()])
 
     def get_rest_response_realtime_temperature_readings(self):
         """
@@ -388,7 +388,7 @@ class TemperatureService(Service):
             timestamp=self.get_current_temperature_reading(_sensor).timestamp,
             sensor_location=_sensor.location,
             sensor_reference=_sensor.reference)
-            for _sensor in self.get_local_sensors()])
+            for _sensor in self.get_local_active_sensors()])
 
 
 if __name__ == '__main__':
