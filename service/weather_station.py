@@ -469,7 +469,7 @@ class AbstractIntensityObserver(Thread):
             # it is assumed that 100% is not reachable, therefore indicates error
             self.failure = measurement == 1000
             if self.failure:
-                break
+                continue
 
             current_state = self.is_active(measurement)
 
