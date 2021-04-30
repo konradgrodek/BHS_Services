@@ -191,7 +191,7 @@ class TankLevelService(Service):
     def _get_fill_percentage(self, level=None):
         if not level:
             level = self._get_last_stored_cesspit_reading().level
-        return int(10000*(self.tank_empty_level-level)/(self.tank_empty_level-self.tank_full_level))/100
+        return int(10000*(self.tank_empty_level-level)/(self.tank_empty_level-self.tank_full_level))/100.0
 
     def main(self) -> float:
         """

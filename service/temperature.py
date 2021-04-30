@@ -251,7 +251,8 @@ class TemperatureService(Service):
             with open(device_file, 'r') as file:
                 lines = file.read().splitlines(keepends=False)
                 sensor_last_modification = datetime.fromtimestamp(os.stat(device_file).st_mtime)
-                if lines[0].endswith('YES') and not lines[0].startswith('00 00 00 00 00 00 00 00 00'):  # crc check
+                if len(lines) > 0 and lines[0].endswith('YES') \
+                        and not lines[0].startswith('00 00 00 00 00 00 00 00 00'):
                     temp_matched = self.device_file_re_pattern.match(lines[1])
                     if temp_matched:
                         temp = int(temp_matched.group(1)) / 1000
