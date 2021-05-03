@@ -183,10 +183,12 @@ class Service:
         self.persistence.connect()
         self.log.info(f'Connected to database {self.persistence.db} as {self.persistence.user}')
 
+        self.initialize()
+
         if self.rest_server:
             self.rest_server.start()
             self.log.info(f'REST Service started @ {self.configuration.getRestPort()}')
-            logging.getLogger('werkzeug').setLevel(logging.ERROR)
+            # logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
         while not ExitEvent().is_set():
             wait_time = self.main()
@@ -223,6 +225,14 @@ class Service:
     def provideName(self) -> str:
         """This method must be overwritten in order to provide name of the service"""
         raise NotImplementedError()
+
+    def initialize(self):
+        """
+        The method is called prior to starting processing, when connection to persistence layer is already established.
+        REST is not started yet when the method is called.
+        :return:
+        """
+        pass
 
     # useful methods
 

@@ -105,12 +105,12 @@ class ADCBoard:
         self.pin_cs.off()  # cs 1
         return response
 
-    def wait_for_drdy(self):
-        for i in range(0, 400000, 1):
-            if self.pin_drdy.is_active:
-                break
-        if i >= 400000:
-            print("Time Out ...")
+    def wait_for_drdy(self, timeout_ms: int = 1000):
+        tm = datetime.now()
+        while not self.exit_event.is_set() and not self.pin_drdy.is_active:
+            if (datetime.now() - tm).total_seconds() > (timeout_ms/1000):
+                raise TimeoutError()
+            self.exit_event.wait(timeout=0.00001)
 
     def config(self, gain, drate):
         self.wait_for_drdy()
@@ -126,7 +126,7 @@ class ADCBoard:
         self.pin_cs.off()  # cs 1
         self._pause(1)
 
-    def get_chip_id(self):
+    def get_chip_id(self) -> int:
         self.wait_for_drdy()
         id = self.read_reg(REG_E['REG_STATUS'])
         return id[0] >> 4
@@ -134,13 +134,19 @@ class ADCBoard:
     def set_channel(self, ch: int):
         self.write_reg(REG_E['REG_MUX'], (ch << 4) | (1 << 3))
 
-    def init(self):
+    def init(self) -> int:
+        """
+        Initializes the device and returns chip-id
+        :return:
+        """
         self.adc.open(0, 0)
         self.adc.max_speed_hz = 20000
         self.adc.mode = 0b01
         self.reset()
-        print(f'Chip-id: {self.get_chip_id()}')
+        chip_id = self.get_chip_id()
+        print(f'Chip-id: {chip_id}')
         self.config(ADS1256_GAIN_E['ADS1256_GAIN_1'], ADS1256_DRATE_E['ADS1256_30000SPS'])
+        return chip_id
 
     def read_adc(self, ch):
         self.set_channel(ch)
@@ -149,10 +155,10 @@ class ADCBoard:
         self.command(CMD['CMD_WAKEUP'])
 
         self.wait_for_drdy()
-        self.pin_cs.on() #cs 0
+        self.pin_cs.on()  # cs 0
         self.adc.writebytes([CMD['CMD_RDATA']])
         buf = self.adc.readbytes(3)
-        self.pin_cs.off() #cs 0
+        self.pin_cs.off()  # cs 0
 
         read = (buf[0] << 16) & 0xff0000
         read |= (buf[1] << 8) & 0xff00
@@ -169,20 +175,32 @@ if __name__ == '__main__':
 
     while True:
         time.sleep(0.2)
-        system('clear')
-
-        print(f'ADC Converter Board')
 
         mark = datetime.now()
         results_raw = list()
         for channel in range(8):
-            results_raw.append((channel, adc_converter.read_adc(channel)))
+            try:
+                results_raw.append((channel, adc_converter.read_adc(channel)))
+            except TimeoutError as e:
+                print(f'Error reading (timeout) {str(e)}')
+
+        system('clear')
+        print(f'ADC Converter Board')
+
+        _min = 220000
+        _max = 4420000
 
         for result_raw in results_raw:
             channel = result_raw[0]
             result_perc = 100 * result_raw[1] / 0x7fffff
-            result_v = 5 * result_raw[1] / 0x7fffff
-            print(f'Channel {channel}\t{result_raw[1]:010}\t{result_v:4.4} [V]\t{result_perc:4.4}%')
+            result_v = 3.3 * result_raw[1] / 0x7fffff
+            result_transformed = 100 * (result_raw[1] - _min) / (_max - _min)
+
+            print(f'Channel {channel}'
+                  f'\t{result_raw[1]:010}'
+                  f'\t{result_v:4.4} [V]'
+                  f'\t{result_perc:4.4}%'
+                  f'\t{result_transformed:4.4}%')
 
         print(f'Measure time {int((datetime.now() - mark).total_seconds()*1000):04} ms')
 
