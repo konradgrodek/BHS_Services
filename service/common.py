@@ -188,7 +188,7 @@ class Service:
         if self.rest_server:
             self.rest_server.start()
             self.log.info(f'REST Service started @ {self.configuration.getRestPort()}')
-            # logging.getLogger('werkzeug').setLevel(logging.ERROR)
+            logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
         while not ExitEvent().is_set():
             wait_time = self.main()

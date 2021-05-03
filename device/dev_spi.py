@@ -1,7 +1,8 @@
 import spidev
 from threading import Event
 from datetime import datetime
-from gpiozero import DigitalOutputDevice, DigitalInputDevice
+from gpiozero import DigitalOutputDevice
+import RPi.GPIO as GPIO
 
 
 class ADCDevice:
@@ -90,10 +91,11 @@ class ADCBoard:
         self.adc = spidev.SpiDev()
 
         self.pin_reset = DigitalOutputDevice(18, active_high=False)
-        self.pin_drdy = DigitalInputDevice(17)
+        self.pin_drdy = 17
+        GPIO.setup(self.pin_drdy, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         self.pin_cs = DigitalOutputDevice(22, active_high=False)
         self.exit_event = exit_event
-        self.drdy_wait_time_ms = 0.1
+        self.drdy_wait_time_ms = 10
         self.reset_wait_time_ms = 200
 
     def _pause(self, delay_ms: float):
@@ -125,14 +127,16 @@ class ADCBoard:
         self.pin_cs.off()  # cs 1
         return response
 
-    def _wait_for_drdy(self, timeout_ms: int = 1000):
+    def _wait_for_drdy(self, timeout_ms: int = 2000):
         tm = datetime.now()
-        while not self.exit_event.is_set() and not self.pin_drdy.is_active:
-            if (datetime.now() - tm).total_seconds() > (timeout_ms/1000):
+        while GPIO.input(self.pin_drdy) == 1:
+            self.exit_event.wait(0.01)
+
+            if (datetime.now() - tm).total_seconds() > timeout_ms/1000:
                 raise TimeoutError()
-            self._pause(delay_ms=self.drdy_wait_time_ms)
-        if self.exit_event.is_set():
-            raise InterruptedError()
+
+            if self.exit_event.is_set():
+                raise InterruptedError()
 
     def _config(self, gain, drate):
         self._wait_for_drdy()

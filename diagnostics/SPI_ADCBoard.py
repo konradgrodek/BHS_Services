@@ -106,11 +106,9 @@ class ADCBoard:
         return response
 
     def wait_for_drdy(self, timeout_ms: int = 1000):
-        tm = datetime.now()
-        while not self.exit_event.is_set() and not self.pin_drdy.is_active:
-            if (datetime.now() - tm).total_seconds() > (timeout_ms/1000):
-                raise TimeoutError()
-            self.exit_event.wait(timeout=0.00001)
+        self.pin_drdy.wait_for_inactive(timeout_ms)
+        if self.pin_drdy.is_active:
+            raise TimeoutError()
 
     def config(self, gain, drate):
         self.wait_for_drdy()

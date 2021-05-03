@@ -31,7 +31,8 @@ class Channel:
     def __str__(self):
         return f'Channel {self.number}:{self.name} | ' \
                f'sensor: {"NA" if not self.sensor else str(self.sensor.db_id)} | ' \
-               f'last value: {self.last_value:.2f} measured @ {self.last_measurement_tm.strftime("%y-%m-%d %H:%M:%S")}'\
+               f'last value: {"NA" if not self.last_value else format(self.last_value,".2f")} ' \
+               f'measured @ {"NA" if not self.last_measurement_tm else self.last_measurement_tm.strftime("%y-%m-%d %H:%M:%S")} |'\
                f'last stored: {"NA" if not self.last_stored_value else str(self.last_stored_value.moisture)} | ' \
                f'tendency: {self.tendency.verbose()}'
 
@@ -155,15 +156,15 @@ class SoilMoistureService(Service):
         return 'soil_moisture'
 
     def read_and_store_humidity(self, channel: Channel):
-
+        tm = datetime.now()
         measurements = array('f')
-        try:
-            while not ExitEvent().is_set() and len(measurements) < self.attempts:
+        timeouts = 0
+        while not ExitEvent().is_set() and len(measurements) < self.attempts and timeouts < self.attempts:
+            try:
                 measurements.append(self._interpret_result(self.device.read_adc(channel.number)))
 
-        except TimeoutError:
-            self.log.critical(f'Querying for state of channel {str(channel)} resulted in timeout error. '
-                              f'If persists, check hardware and wireing')
+            except TimeoutError:
+                timeouts += 1
 
         if len(measurements) > 0:
             humidity_avg = stats.tmean(measurements)
@@ -174,7 +175,8 @@ class SoilMoistureService(Service):
 
             self.log.info(f'Hum. ch {channel.number}:{channel.name} {humidity_avg:.2f}%, '
                           f'var: {humidity_var:.4f}, kurtosis: {humidity_kur:.4f}. '
-                          f'tend: {channel.tendency.verbose()}')
+                          f'tend: {channel.tendency.verbose()}, timeouts: {timeouts}, '
+                          f'duration: {int((datetime.now()-tm).total_seconds()*1000):04} [ms]')
 
             # store the result
             if not channel.last_stored_value \
@@ -184,8 +186,10 @@ class SoilMoistureService(Service):
                     moisture=humidity_avg,
                     timestamp=datetime.now())
                 self.log.info(f'Stored new reading: {str(channel.last_stored_value)}')
-
-            # open question: does the variance provide anything meaningful?
+            # open question: does the variance\kurtosis provide anything meaningful for later analysis?
+        else:
+            self.log.critical(f'Querying for state of channel {str(channel)} resulted in timeout error. '
+                              f'If persists, check hardware and wireing')
 
     def _interpret_result(self, raw_result: int) -> float:
         """
