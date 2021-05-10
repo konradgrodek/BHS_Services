@@ -2,10 +2,10 @@
 
 from gpiozero import LED, OutputDevice
 from logging import Logger
-import time
 
 from service.common import *
 from device.buttons import StatelessButton
+from service.common import ExitEvent
 
 
 class Outputs:
@@ -206,7 +206,7 @@ class IrrigationInProgress(IrrigationState):
 
     def on_stop(self):
         self._pump_off()
-        time.sleep(self.config.pump_stop_delay)
+        self.termination_event.wait(self.config.pump_stop_delay)
         self._valve_off()
 
         if not self.next:
