@@ -3,7 +3,6 @@
 import glob
 import re
 import os
-import time
 from threading import Lock
 
 from service.common import *
