@@ -222,7 +222,8 @@ class TankLevelService(Service):
             last_reliable_reading = self._get_last_reliable_cesspit_reading()
             last_stored_reading = self._get_last_stored_cesspit_reading()
 
-            if self._is_reliable(current_level, last_reliable_reading):
+            if self._is_reliable(current_level, last_reliable_reading) \
+                    or self._is_reliable(current_level, last_stored_reading):
                 self.log.info(f'OK {len(measurements)} measurements, '
                               f'mode: {current_level} [mm] ({self._get_fill_percentage(current_level):.2f} [%]), '
                               f'mean: {current_level_mean:.2f}')
@@ -301,10 +302,13 @@ class TankLevelService(Service):
         self.led_signal.blue_blink()
 
     def get_rest_response_current_reading(self):
+        pessimistic_reading = self._get_last_reliable_cesspit_reading() \
+            if self._get_last_reliable_cesspit_reading().level < self._get_last_stored_cesspit_reading().level \
+            else self._get_last_stored_cesspit_reading()
         return self.jsonify(CesspitReadingJson(
-            level_mm=self._get_last_reliable_cesspit_reading().level,
-            fill_perc=self._get_fill_percentage(self._get_last_reliable_cesspit_reading().level),
-            timestamp=self._get_last_reliable_cesspit_reading().timestamp)
+            level_mm=pessimistic_reading.level,
+            fill_perc=self._get_fill_percentage(pessimistic_reading.level),
+            timestamp=pessimistic_reading.timestamp)
         )
 
 
