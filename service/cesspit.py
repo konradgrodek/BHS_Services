@@ -208,7 +208,7 @@ class TankLevelService(Service):
                 attempt += 1
                 measurements.append(self._measure())
             except DistanceMeasureException as exception:
-                self.log.critical(f'Unsuccessful {attempt} attempt to measure', exception)
+                self.log.critical(f'Unsuccessful {attempt} attempt to measure, details: {exception.message}')
             if self.measure_attempts_pause_time > 0:
                 ExitEvent().wait(self.measure_attempts_pause_time)
 

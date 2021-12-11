@@ -283,7 +283,7 @@ class ServiceRunner:
         except:
             logging.getLogger().critical(
                 f'Uncaught exception detected when creating instance of service {str(self.service_class)}. '
-                f'Check configuration', sys.exc_info())
+                f'Check configuration', exc_info=sys.exc_info())
             print(str(sys.exc_info()))
             sys.stderr.write(str(sys.exc_info()))
             exit()
@@ -301,7 +301,7 @@ class ServiceRunner:
                 eevent.set()
 
             logging.getLogger().critical(
-                f'As the database is not available at the moment, the service is turning down', exc)
+                f'As the database is not available at the moment, the service is turning down', exc_info=exc)
 
         except DatabaseOperationAborted as exc:
             logging.getLogger().info(
@@ -309,7 +309,7 @@ class ServiceRunner:
 
         except:
             self.service.log.critical(
-                f'Uncaught exception detected when running service', sys.exc_info())
+                f'Uncaught exception detected when running service', exc_info=sys.exc_info())
             print(str(sys.exc_info()))
             sys.stderr.write(str(sys.exc_info()))
             exit()
