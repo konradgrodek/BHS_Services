@@ -40,7 +40,7 @@ class SolarPlantMonitor(Service):
     def __init__(self):
         Service.__init__(self)
 
-        solar_plant_section = 'POWER-PLANT'
+        solar_plant_section = 'SOLAR-PLANT'
         self.polling_period_s = self.configuration.getIntConfigValue(
             section=solar_plant_section, parameter='polling-period-s', default=60)
         self.solar_plant_hostname = self.configuration.getConfigValue(
@@ -110,7 +110,7 @@ class SolarPlantMonitor(Service):
         return sleep_time_s
 
     def provideName(self) -> str:
-        return 'solar_plant'
+        return 'solar-plant'
 
     def cleanup(self):
         """Override this method to react on SIGTERM"""
