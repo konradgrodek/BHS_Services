@@ -11,7 +11,8 @@ from device.dev_spi import *
 
 
 class Channel:
-    def __init__(self, number: int, name: str, tendency_observations_window: int):
+    def __init__(self, number: int, name: str, tendency_observations_window: int,
+                 raw_value_min: int, raw_value_max: int):
         self.number = number
         self.name = name
         self.sensor: Sensor = None
@@ -19,12 +20,27 @@ class Channel:
         self.last_value = None
         self.last_measurement_tm = None
         self.tendency = TendencyChecker(observations_window=tendency_observations_window)
+        self.raw_value_min = raw_value_min
+        self.raw_value_max = raw_value_max
 
     def get_reference(self) -> str:
         return f'{self.name}@{self.number}'
 
-    def add_reading(self, val: float):
-        self.last_value = float(val)
+    def interpret(self, raw_result: int) -> float:
+        """
+        The ADC board returns value, that must be transformed into percentage value
+        :param raw_result: int
+        :return: float, percentage of the value using min and max value, never exceeding 100, always gt0
+        """
+        perc = 100.0 * (raw_result - self.raw_value_min) / (self.raw_value_max - self.raw_value_min)
+        if perc > 100.0:
+            perc = 100.0
+        if perc < 0.0:
+            perc = 0.0
+        return perc
+
+    def add_interpreted_reading(self, interpreted_val: float):
+        self.last_value = float(interpreted_val)
         self.tendency.tendency(observation=self.last_value)
         self.last_measurement_tm = datetime.now()
 
@@ -62,10 +78,6 @@ class SoilMoistureService(Service):
             parameter='measure-attempts',
             default=30)
 
-        # some constants
-        self.raw_value_min = 220000
-        self.raw_value_max = 4420000
-
         # how many observations should be monitored for a tendency
         # let's assume it is last 5 hours
         tendency_observations_window = int((5 * 60 * 60) / self.polling_period)
@@ -76,13 +88,18 @@ class SoilMoistureService(Service):
 
         # read channels
         channel_pattern = re.compile('channel\\.(\\d+)')
+        channel_config_pattern = re.compile("(.*)\\|(\\d+)\\|(\\d+)")
 
         for ch_opt in self.configuration.config_parser.options(channels_section):
             ch_opt_matched = channel_pattern.match(ch_opt)
             if ch_opt_matched:
-                self.channels.append(Channel(number=int(ch_opt_matched.group(1)),
-                                             name=self.configuration.getConfigValue(channels_section, ch_opt),
-                                             tendency_observations_window=tendency_observations_window))
+                ch_val_matched = channel_config_pattern.match(self.configuration.getConfigValue(channels_section, ch_opt))
+                if ch_val_matched:
+                    self.channels.append(Channel(number=int(ch_opt_matched.group(1)),
+                                                 name=ch_val_matched.group(1),
+                                                 tendency_observations_window=tendency_observations_window,
+                                                 raw_value_min=int(ch_val_matched.group(2)),
+                                                 raw_value_max=int(ch_val_matched.group(3))))
 
         if len(self.channels) < 1:
             self.log.critical('The configuration does not specify a single channel to monitor. '
@@ -161,7 +178,7 @@ class SoilMoistureService(Service):
         timeouts = 0
         while not ExitEvent().is_set() and len(measurements) < self.attempts and timeouts < self.attempts:
             try:
-                measurements.append(self._interpret_result(self.device.read_adc(channel.number)))
+                measurements.append(channel.interpret(self.device.read_adc(channel.number)))
 
             except TimeoutError:
                 timeouts += 1
@@ -171,7 +188,7 @@ class SoilMoistureService(Service):
             humidity_var = stats.variation(measurements)
             humidity_kur = stats.kurtosis(measurements)
 
-            channel.add_reading(humidity_avg)
+            channel.add_interpreted_reading(humidity_avg)
 
             self.log.info(f'Hum. ch {channel.number}:{channel.name} {humidity_avg:.2f}%, '
                           f'var: {humidity_var:.4f}, kurtosis: {humidity_kur:.4f}. '
@@ -190,14 +207,6 @@ class SoilMoistureService(Service):
         else:
             self.log.critical(f'Querying for state of channel {str(channel)} resulted in timeout error. '
                               f'If persists, check hardware and wireing')
-
-    def _interpret_result(self, raw_result: int) -> float:
-        """
-        The ADC board returns value, that must be transformed into percentage value
-        :param raw_result: int
-        :return: float, percentage of the value using min and max value
-        """
-        return 100.0 * (raw_result - self.raw_value_min) / (self.raw_value_max - self.raw_value_min)
 
     def get_rest_response_current_humidity_readings(self):
         """
