@@ -339,6 +339,8 @@ class SolarPlantMonitor(Service):
             d_production=daily_production,
             production=current_production,
             h_min=_min_w, h_avg=_avg_w, h_max=_max_w,
+            last_production_at=self.last_daily_stored_reading.modified_at if self.last_daily_stored_reading is not None
+            else None,
             timestamp=datetime.now()))
 
 
