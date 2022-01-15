@@ -4,6 +4,7 @@ import glob
 import re
 import os
 from threading import Lock
+from scipy import stats
 
 from service.common import *
 from core.bean import TemperatureReadingJson
@@ -60,6 +61,12 @@ class TemperatureService(Service):
             section=temperature_section,
             parameter='retry-delay',
             default=1.0)
+
+        self.single_measurement_count = self.configuration.getIntConfigValue(
+            section=temperature_section,
+            parameter='single-measurements-count',
+            default=1
+        )
 
         self.significant_difference = self.configuration.getFloatConfigValue(
             section=temperature_section,
@@ -229,13 +236,38 @@ class TemperatureService(Service):
 
         return readings
 
-    def get_reading(self, device_dir: str, retry_count: int = 0) -> SimpleTemperatureReading:
+    def get_reading(self, device_dir: str) -> SimpleTemperatureReading:
+        """
+        Performs N measurements for given device. The aggregated result is provided with:
+        (i) temperature as mode of all successful attempts
+        (ii) success is reported if at least one measurement succeeded
+        The rest of attributes (especially the time mark) is inherited from last measurement.
+        N = config.single-measurements-count
+        :param device_dir: the device to read from
+        :return: the simple-temperature-reading
+        """
+        measurements = list()
+        for _i in range(self.single_measurement_count):
+            measurements.append(self.get_single_reading(device_dir=device_dir))
+
+        result = measurements[-1]
+
+        result.temperature = stats.mode([m.temperature for m in measurements], nan_policy='omit').mode[0]
+        result.succeeded = sum([int(m.succeeded) for m in measurements]) > 0
+
+        if result.succeeded:
+            self.log.info(f'Read {result.temperature} [\u2103] '
+                          f'@ {self.get_human_readable_sensor_name(result.reference)}')
+
+        return result
+
+    def get_single_reading(self, device_dir: str, retry_count: int = 0) -> SimpleTemperatureReading:
         """
         Gets reading of the sensor that reports to a specified dir.
         The method may be called in recurrent way, but with limit.
         :param device_dir: the dir for readings
         :param retry_count: the count of previous attempts to get the reading
-        :return:
+        :return: the simple-temperature-reading
         """
         device_file = device_dir + DEVICE_SUBDIR
         sensor_reference = os.path.basename(device_dir)
@@ -248,9 +280,10 @@ class TemperatureService(Service):
         temp = None
         try:
             with open(device_file, 'r') as file:
-                lines = file.read().splitlines(keepends=False)
+                lines = file.read()
+                lines = lines.splitlines(keepends=False) if lines is not None else None
                 sensor_last_modification = datetime.fromtimestamp(os.stat(device_file).st_mtime)
-                if len(lines) > 0 and lines[0].endswith('YES') \
+                if lines is not None and len(lines) > 0 and lines[0].endswith('YES') \
                         and not lines[0].startswith('00 00 00 00 00 00 00 00 00'):
                     temp_matched = self.device_file_re_pattern.match(lines[1])
                     if temp_matched:
@@ -260,7 +293,7 @@ class TemperatureService(Service):
                                        f'lines: {lines}')
                         success = True if temp < 85.0 else False
                         if success:
-                            self.log.info(
+                            self.log.debug(
                                 f'Read {temp} [\u2103] @ {self.get_human_readable_sensor_name(sensor_reference)}'
                                 f'{"" if retry_count == 0 else ", attempt: "+str(retry_count)}')
                     else:
@@ -271,13 +304,14 @@ class TemperatureService(Service):
                                        f'First line is: {lines[0]}')
 
                 else:
-                    self.log.error(f'Temperature reading failed. Read lines are: {lines}')
+                    self.log.error(f'Temperature reading failed. '
+                                   f'Read lines are: {lines if lines is not None else "NONE"}')
         except FileNotFoundError:
             self.log.error(f'Temperature reading failed. Error reading from IO: {sys.exc_info()}')
 
         if not success and retry_count < self.max_retry_count:
             ExitEvent().wait(self.retry_delay)
-            return self.get_reading(device_dir, retry_count + 1)
+            return self.get_single_reading(device_dir, retry_count + 1)
 
         return SimpleTemperatureReading(success, sensor_reference, temp, datetime.now())
 

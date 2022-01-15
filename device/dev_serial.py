@@ -87,11 +87,13 @@ class DistanceMeterDevice:
     Facilitates distance measure made utilizing sensor ME007YS
     """
 
-    def __init__(self):
+    def __init__(self, timeout_seconds: float = 5.0):
         """
         Initializes the serial device
+        :param: timeout_s timeout in seconds
         """
         self._device = serial.Serial("/dev/ttyAMA0", 9600)
+        self._timeout = timeout_seconds
 
     def measure(self) -> int:
         """
@@ -104,8 +106,9 @@ class DistanceMeterDevice:
             mark = datetime.now()
             while self._device.inWaiting() == 0:
                 time.sleep(0.1)
-                if (datetime.now() - mark).total_seconds() > 1.0:
-                    raise DistanceMeasureException('timeout occurred while waiting for anything to be read')
+                if (datetime.now() - mark).total_seconds() > self._timeout:
+                    raise DistanceMeasureException(f'Timeout occurred ({(datetime.now() - mark).total_seconds()}'
+                                                   f') while waiting for anything to be read')
 
             data = []
             i = 0
@@ -121,16 +124,16 @@ class DistanceMeterDevice:
             if i == 4:
                 sum = (data[0] + data[1] + data[2]) & 0x00ff
                 if sum != data[3]:
-                    raise DistanceMeasureException(f'checksum error, got {sum}, '
-                                           f'expected {data[3]} '
-                                           f'data: [{data[0]}]-[{data[1]}]-[{data[2]}]-[{data[3]}]')
+                    raise DistanceMeasureException(f'Checksum error, got {sum}, '
+                                                   f'expected {data[3]} '
+                                                   f'data: [{data[0]}]-[{data[1]}]-[{data[2]}]-[{data[3]}]')
                 else:
                     measurement = data[1] * 256 + data[2]
             else:
                 raise DistanceMeasureException(f'Data error, number of read bytes is {i}, read bytes: {data}')
 
         else:
-            raise DistanceMeasureException('device is not open')
+            raise DistanceMeasureException('Device is not open')
         return measurement
 
 

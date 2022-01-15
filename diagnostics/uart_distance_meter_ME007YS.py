@@ -18,6 +18,10 @@ if __name__ == '__main__':
 
     print(f'Device name: {device.name}. Settings: {device.get_settings()}. Starting @ {datetime.now().isoformat()}')
 
+    if not device.isOpen():
+        print(f'Device {device.name} is not open!')
+        exit()
+
     while device.isOpen():
         mark = datetime.now()
         device.flush()
