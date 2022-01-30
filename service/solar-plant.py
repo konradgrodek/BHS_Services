@@ -226,7 +226,7 @@ class SolarPlantMonitor(Service):
                             self.log.error(f'The daily production cant be extracted '
                                            f'from "{html[daily_pow_start:daily_pow_ends]}" '
                                            f'(not a floating point number), {str(e)}')
-            except requests.exceptions.ConnectionError as conn_err:
+            except requests.exceptions.RequestException as conn_err:
                 self.log.error(f'Getting the inverter status failed due to connection error: {str(conn_err)}')
 
         else:
