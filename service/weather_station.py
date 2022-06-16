@@ -2,16 +2,19 @@
 
 from array import array
 from scipy import stats
-from collections import deque
+from collections import deque, Counter
 import re
 
 from service.common import *
 from device.dev_i2c import *
 from device.dev_serial import *
 from device.dev_spi import *
+from device.buttons import StatelessButton
 from core.bean import *
+from core.util import TimeWindowList
 from util.tendency import TendencyChecker
 from persistence.schema import *
+from datetime import timedelta
 
 
 class WeatherStationService(Service):
@@ -49,7 +52,7 @@ class WeatherStationService(Service):
         daylight_detection_threshold = self.configuration.getIntConfigValue(
             section=daylight_section,
             parameter='threshold_percentage',
-            default=97
+            default=94
         )
         daylight_detection_threshold_hysteresis = self.configuration.getFloatConfigValue(
             section=daylight_section,
@@ -62,26 +65,21 @@ class WeatherStationService(Service):
             default=60
         )
 
-        rain_section = 'RAIN'
-        rain_measure_each_ms = self.configuration.getIntConfigValue(
-            section=rain_section,
-            parameter='measure-each-milliseconds',
+        wind_section = 'WIND'
+        wind_direction_measure_each_ms = self.configuration.getIntConfigValue(
+            section=wind_section,
+            parameter='direction-measure-each-milliseconds',
             default=200)
-        rain_detection_threshold = self.configuration.getIntConfigValue(
-            section=rain_section,
-            parameter='threshold_percentage',
-            default=50
-        )
-        rain_detection_threshold_hysteresis = self.configuration.getFloatConfigValue(
-            section=rain_section,
-            parameter='threshold_hysteresis',
-            default=1
-        )
-        rain_noticeable_duration = self.configuration.getIntConfigValue(
-            section=rain_section,
-            parameter='noticeable-duration',
-            default=60
-        )
+        anemometer_pin = self.configuration.getIntConfigValue(
+            section=wind_section,
+            parameter='anemometer-pin',
+            default=5)
+
+        rain_gauge_section = 'RAIN-GAUGE'
+        rain_gauge_pin = self.configuration.getIntConfigValue(
+            section=rain_gauge_section,
+            parameter='rain-gauge-pin',
+            default=6)
 
         multisensor_section = 'MULTISENSOR'
         multisensor_polling_period = self.configuration.getIntConfigValue(
@@ -141,18 +139,20 @@ class WeatherStationService(Service):
             threshold_hysteresis=daylight_detection_threshold_hysteresis,
             min_duration_s=daylight_noticeable_duration)
 
-        self.rain_observer = RainObserver(
-            parent=self,
-            sleep_time_between_measures_s=rain_measure_each_ms / 1000,
-            threshold_percentage=rain_detection_threshold,
-            threshold_hysteresis=rain_detection_threshold_hysteresis,
-            min_duration_s=rain_noticeable_duration)
-
         self.multisensor_observer = MultisensorObserver(
             parent=self,
             sleep_time_between_measures_s=multisensor_measure_each_ms / 1000,
             measure_polling_period_s=multisensor_polling_period,
             measure_duration_s=multisensor_measurement_duration)
+
+        self.wind_observer = WindObserver(
+            parent=self,
+            anemometer_pin=anemometer_pin,
+            temp_file_loc='/var/tmp',
+            wind_direction_measure_each_ms=wind_direction_measure_each_ms)
+
+        self.rain_gauge_observer = RainGaugeObserver(
+            parent=self, gauge_pin=rain_gauge_pin)
 
         # cooling down fellow host
         self.fan_control = RPiCoolDown(
@@ -167,8 +167,8 @@ class WeatherStationService(Service):
                                    self.get_rest_response_last_air_quality)
         self.rest_app.add_url_rule('/daylight', 'daylight',
                                    self.get_rest_response_daylight)
-        self.rest_app.add_url_rule('/rain', 'rain',
-                                   self.get_rest_response_rain)
+        self.rest_app.add_url_rule('/wind', 'wind',
+                                   self.get_rest_response_wind)
         self.rest_app.add_url_rule('/humidity_in', 'humidity_in',
                                    self.get_rest_response_humidity)
         self.rest_app.add_url_rule('/pressure', 'pressure',
@@ -187,15 +187,18 @@ class WeatherStationService(Service):
         if not self.luminosity_observer.is_alive():
             self.luminosity_observer.start()
 
-        if not self.rain_observer.is_alive():
-            self.rain_observer.start()
-
         if not self.multisensor_observer.is_alive():
             self.multisensor_observer.start()
 
         if self.cooling_config != CoolingConfig.Inactive:
             if not self.fan_control.is_alive():
                 self.fan_control.start()
+
+        if not self.wind_observer.is_alive():
+            self.wind_observer.start()
+
+        if not self.rain_gauge_observer.is_alive():
+            self.rain_gauge_observer.start()
 
         # air quality
         self.measure_air_quality()
@@ -204,8 +207,11 @@ class WeatherStationService(Service):
 
     def cleanup(self):
         """Override this method to react on SIGTERM"""
-        self.log.debug('Nothing to clean')
-        pass
+        self.luminosity_observer.join()
+        self.multisensor_observer.join()
+        self.fan_control.join()
+        self.wind_observer.join()
+        self.rain_gauge_observer.join()
 
     def provideName(self):
         return 'weather_station'
@@ -348,25 +354,69 @@ class WeatherStationService(Service):
 
         return sensor
 
-    def get_rain_sensor(self):
+    def get_rain_gauge_sensor(self) -> Sensor:
         """
-        Method ensures that the sensor measuring rain intensity has its database representation and then returns it.
+        Method ensures that the sensor measuring rain volumes has its database representation and then returns it.
         :return: the persistence-bean representing the sensor as fetched from the database
         """
-        sensor = self.sensors.get(RAIN_THE_SENSOR_REFERENCE)
+        sensor = self.sensors.get(RAIN_GAUGE_THE_SENSOR_REFERENCE)
 
         if not sensor:
-            sensor = self.sensors[RAIN_THE_SENSOR_REFERENCE] = self.persistence.get_sensor(
-                sensor_type_name=SENSORTYPE_INTENSITY, reference=RAIN_THE_SENSOR_REFERENCE)
+            sensor = self.sensors[RAIN_GAUGE_THE_SENSOR_REFERENCE] = self.persistence.get_sensor(
+                sensor_type_name=SENSORTYPE_IMPLULSE, reference=RAIN_GAUGE_THE_SENSOR_REFERENCE)
 
         if not sensor:
-            sensor = self.sensors[RAIN_THE_SENSOR_REFERENCE] = self.persistence.register_sensor(
-                sensor_type_name=SENSORTYPE_INTENSITY,
+            sensor = self.sensors[RAIN_GAUGE_THE_SENSOR_REFERENCE] = self.persistence.register_sensor(
+                sensor_type_name=SENSORTYPE_IMPLULSE,
                 host=self.get_hostname(),
-                reference=RAIN_THE_SENSOR_REFERENCE,
-                pin=None)
+                reference=RAIN_GAUGE_THE_SENSOR_REFERENCE,
+                pin=self.rain_gauge_observer.observed_pin.pin.number)
 
         return sensor
+
+    def get_wind_sensor(self) -> Sensor:
+        """
+        Method ensures that the sensor measuring wind speed and direction has its database representation
+        and then returns it.
+        :return: the persistence-bean representing the sensor as fetched from the database
+        """
+        sensor = self.sensors.get(WIND_THE_SENSOR_REFERENCE)
+
+        if not sensor:
+            sensor = self.sensors[WIND_THE_SENSOR_REFERENCE] = self.persistence.get_sensor(
+                sensor_type_name=SENSORTYPE_WIND, reference=WIND_THE_SENSOR_REFERENCE)
+
+        if not sensor:
+            sensor = self.sensors[WIND_THE_SENSOR_REFERENCE] = self.persistence.register_sensor(
+                sensor_type_name=SENSORTYPE_WIND,
+                host=self.get_hostname(),
+                reference=WIND_THE_SENSOR_REFERENCE,
+                pin=self.wind_observer.anemometer.observed_pin.pin.number)
+
+        return sensor
+
+    def store_wind_observation(self) -> WindObservation:
+        _direction = self.wind_observer.direction.get_dominant_direction_1hour()
+        _speed = self.wind_observer.anemometer.get_observations_1hour()
+        _pressure = int(self.multisensor_observer.pressure_tendency_checker.current_mean)
+        return self.persistence.store_wind_observation(
+            _sensor=self.get_wind_sensor(),
+            started_at=min(_direction.started_at, _speed.started_at),
+            ended_at=max(_direction.ended_at, _speed.ended_at),
+            wind_avg=_speed.average_speed,
+            wind_peak=_speed.peak,
+            wind_variance=_speed.variance,
+            pressure=_pressure,
+            direction_dominant=_direction.dominant_direction.value,
+            direction_variance=_direction.direction_variance)
+
+    def store_rain_gauge_impulse(self) -> ImpulseCounter:
+        _now = datetime.now()
+        return self.persistence.store_impulse_counter(
+            _sensor=self.get_rain_gauge_sensor(),
+            period_start=_now,
+            period_end=_now,
+            impulse_count=1)
 
     def get_rest_response_last_air_quality(self):
         """
@@ -395,15 +445,6 @@ class WeatherStationService(Service):
         """
         return self.jsonify(self.luminosity_observer.get_current_observation())
 
-    def get_rest_response_rain(self):
-        """
-        Method, which will be called by REST interface when encountering /rain URL.
-        In response, JSON with the last measurement of the rain detector is sent
-        together with flag indicating if the actual rain is detected
-        :return: FLASK JSON reponse
-        """
-        return self.jsonify(self.rain_observer.get_current_observation())
-
     def get_rest_response_humidity(self):
         """
         Method, which will be called by REST interface when encountering /humidity_in URL.
@@ -422,10 +463,19 @@ class WeatherStationService(Service):
         """
         return self.jsonify(self.multisensor_observer.get_pressure_reading())
 
+    def get_rest_response_wind(self):
+        """
+        This method will be called by REST interface upon an request for wind observation.
+        As a response WindObservationsReadingJson will be jsonified and returned
+        :return: FLASK JSON response
+        """
+        return self.jsonify(self.wind_observer.get_current_observation())
+
 
 class AbstractIntensityObserver(Thread):
     """
     Abstract class collecting common functionality of Daylight and Rain sensors
+    Note: since 05.2022 Rain Observer is retired, replaced with Rain Gauge
     """
 
     def __init__(
@@ -437,6 +487,7 @@ class AbstractIntensityObserver(Thread):
             min_duration_s: int):
         """
         Initializes Daylight or Rain observer (separate thread responsible for performing measurements)
+        Note: since 05.2022 Rain Observer is retired and replaced by Rain Gauge
         :param parent: the Whether Station service starting the thread
         :param sleep_time_between_measures_s: defines how long the thread should wait until next measure
         :param threshold_percentage: defines the 'starting point' of the direct sunlight or rain
@@ -684,66 +735,351 @@ class LuminosityObserver(AbstractADCObserver):
                 is_sunlight=self.is_observation_active)
 
 
-class RainObserver(AbstractADCObserver):
+class Impulse:
+    def __init__(self,
+                 time_mark: datetime = datetime.now(),
+                 duration_s: float = 0.0, time_since_previous_s: float = 0.0):
+        self.time_mark = time_mark
+        self.duration_s = duration_s
+        self.time_since_previous_s = time_since_previous_s
 
-    def __init__(
-            self,
-            parent: WeatherStationService,
-            sleep_time_between_measures_s: float,
-            threshold_percentage: int,
-            threshold_hysteresis: float,
-            min_duration_s: int):
-        """
-        Initializes Rain Observer (separate thread responsible for performing measurements)
-        :param parent: the Whether Station service starting the thread
-        :param sleep_time_between_measures_s: defines how long the thread should wait until next measure
-        :param threshold_percentage: defines the 'starting point' of the rain
-        :param threshold_hysteresis: the allowed deviation from the 'starting point', which will be ignored
-        :param min_duration_s: defines minimal time in seconds of duration of rain to be stored in the database
-        """
-        AbstractADCObserver.__init__(
-            self,
-            parent,
-            sleep_time_between_measures_s,
-            threshold_percentage,
-            threshold_hysteresis,
-            min_duration_s)
+    def get_time_mark(self):
+        return self.time_mark
 
-    def __str__(self):
-        return f'Rain observer ' \
-               f'[threshold: {self.observation_start_threshold_per_mille} \u2030, ' \
-               f'min duration: {self.observation_minimum_duration_seconds} seconds]'
+    def to_json(self):
+        return json.dumps([self.time_mark.isoformat(), self.duration_s, self.time_since_previous_s])
 
-    def provide_channel(self) -> int:
-        """
-        Returns appropriate channel in AD converter device
-        :return: 2
-        """
-        return 2
+    @staticmethod
+    def from_json(jsn: str):
+        _parsed = json.loads(jsn)
+        return Impulse(time_mark=datetime.fromisoformat(_parsed[0]),
+                       duration_s=float(_parsed[1]),
+                       time_since_previous_s=float(_parsed[2]))
 
-    def provide_sensor(self) -> Sensor:
-        """
-        Calls parent service to obtain rain sensor object
-        :return:
-        """
-        return self.parent_service.get_rain_sensor()
 
-    def get_current_observation(self) -> AbstractJsonBean:
-        """
-        Method invoked by REST interface to get current observation as JSON-ready object
-        :return: ErrorJsonBean if the thread is dead. NotAvailableJsonBean if there are no observations made
-        (highly improbable). DaylightReadingJson if the observation is up and running, containg average percentage
-        value of the current rain intensity and flag denoting if observation is active
-        """
-        if not self.is_alive():
-            return ErrorJsonBean('Error occurred')
+class WinDirReading:
+    def __init__(self, time_mark: datetime, direction: WindDirection):
+        self.time_mark = time_mark
+        self.direction = direction
 
-        if len(self.current_observations) == 0:
-            return NotAvailableJsonBean()
+    def get_time_mark(self):
+        return self.time_mark
 
-        return RainReadingJson(
-            volume_perc=int(stats.tmean(self.current_observations) / 10),
-            is_raining=self.is_observation_active)
+    def to_json(self):
+        return json.dumps([self.time_mark.isoformat(), self.direction.value])
+
+    @staticmethod
+    def from_json(jsn: str):
+        _parsed = json.loads(jsn)
+        return WinDirReading(
+            time_mark=datetime.fromisoformat(_parsed[0]),
+            direction=WindDirection(int(_parsed[1])))
+
+
+class WindDirectionObservation:
+    """
+    Simple bean-like class, which purpose is to collect all wind direction observation attributes
+    """
+    def __init__(self,
+                 dominant_direction: WindDirection,
+                 direction_variance: int,
+                 started_at: datetime,
+                 ended_at: datetime):
+        self.dominant_direction = dominant_direction
+        self.direction_variance = direction_variance
+        self.started_at = started_at
+        self.ended_at = ended_at
+
+    def duration_s(self) -> int:
+        return 0 if self.started_at is None or self.ended_at is None \
+            else int((self.ended_at - self.started_at).total_seconds())
+
+
+class WindSpeedObservation:
+    """
+    Simple bean-like class, which aim is to collect all the outputs of wind speed observation
+    """
+    def __init__(self, average_speed: float, peak: float, variance: float, started_at: datetime, ended_at: datetime):
+        self.average_speed = average_speed
+        self.peak = peak
+        self.variance = variance
+        self.started_at = started_at
+        self.ended_at = ended_at
+
+    def duration_s(self) -> int:
+        return 0 if self.started_at is None or self.ended_at is None \
+            else int((self.ended_at - self.started_at).total_seconds())
+
+
+class WindObserver(Thread):
+    DURATION_1MIN_S = 60
+    DURATION_1HOUR_S = 60 * 60
+
+    def __init__(self,
+                 parent: WeatherStationService,
+                 anemometer_pin: int,
+                 temp_file_loc: str,
+                 wind_direction_measure_each_ms: int):
+        Thread.__init__(self)
+        self.parent = parent
+        self.anemometer = self.AnemometerObserver(pin=anemometer_pin, temp_file_loc=temp_file_loc)
+        self.direction = self.WindDirectionObserver(
+            parent=parent,
+            temp_file_loc=temp_file_loc,
+            sleep_time_between_measures_s=wind_direction_measure_each_ms/1000)
+
+    def run(self) -> None:
+        # restore last reading
+
+        # start sub-threads
+        self.anemometer.start()
+        self.direction.start()
+
+        while not ExitEvent().is_set():
+            # sleeps till full hour
+            ExitEvent().wait(
+                timeout=(
+                    (datetime.now() + timedelta(hours=1)).
+                    replace(minute=0, second=0, microsecond=0) - datetime.now()).total_seconds())
+            # store the reading to database
+            if not ExitEvent().is_set() and self.anemometer.last_observation_at is not None:
+                db_bean = self.parent.store_wind_observation()
+                self.parent.log.info(f'Wind observation stored to database: {str(db_bean)}')
+
+                _unknown_dir = self.direction.unknown_readings_1hour()
+                mc_unknown_dir_list = ",".join([f"{_mc}: {int(100*_mc[1]/len(_unknown_dir))}%"
+                                                for _mc in Counter(_unknown_dir).most_common(10)])
+                if db_bean.direction_dominant == WindDirection.UNKNOWN:
+                    self.parent.log.warning(f'There is a lot of unknown readings ({len(_unknown_dir)}): '
+                                            f'{mc_unknown_dir_list}')
+                else:
+                    self.parent.log.debug(f'There is {len(_unknown_dir)} unknown readings. '
+                                          f'Most common are: {mc_unknown_dir_list}')
+
+                _all_dir_readings = self.direction.all_readings_1hour()
+                mc_all_dir_list = ",".join([f"{_mc[0].name}: {int(100*_mc[1]/len(_all_dir_readings))}%"
+                                            for _mc in Counter(_all_dir_readings).most_common()])
+                self.parent.log.debug(f'All detected directions: {mc_all_dir_list}')
+
+        # wait for other threads to die
+        self.anemometer.join()
+        self.direction.join()
+
+    def get_current_observation(self) -> WindObservationsReadingJson:
+        direction_1min = self.direction.get_dominant_direction_1min()
+        speed_1min = self.anemometer.get_observations_1min()
+        direction_1hour = self.direction.get_dominant_direction_1hour()
+        speed_1hour = self.anemometer.get_observations_1hour()
+
+        return WindObservationsReadingJson(
+            short_term_observation=WindObservationReadingJson(
+                duration_s=direction_1min.duration_s() if direction_1min.duration_s() > speed_1min.duration_s()
+                else speed_1min.duration_s(),
+                direction=direction_1min.dominant_direction,
+                direction_var=direction_1min.direction_variance,
+                wind_speed=speed_1min.average_speed,
+                wind_peak=speed_1min.peak,
+                wind_variance=speed_1min.variance),
+            long_term_observation=WindObservationReadingJson(
+                duration_s=direction_1hour.duration_s() if direction_1hour.duration_s() > speed_1hour.duration_s()
+                else speed_1hour.duration_s(),
+                direction=direction_1hour.dominant_direction,
+                direction_var=direction_1hour.direction_variance,
+                wind_speed=speed_1hour.average_speed,
+                wind_peak=speed_1hour.peak,
+                wind_variance=speed_1hour.variance))
+
+    class AnemometerObserver(Thread):
+        ONE_IMPULSE_PER_SEC_IS_KMPH = 2.4
+        STORE_TEMP_DATA_EACH_S = 600
+
+        def __init__(self, pin: int, temp_file_loc: str):
+            Thread.__init__(self)
+            self.last_observation_at: datetime = None
+            self.observed_pin = StatelessButton(pin, self._on_signal)
+            self._observations_1min = TimeWindowList(
+                validity_time_s=WindObserver.DURATION_1MIN_S, get_time_mark_function=lambda x: x.get_time_mark())
+            self._observations_1hour = TimeWindowList(
+                validity_time_s=WindObserver.DURATION_1HOUR_S, get_time_mark_function=lambda x: x.get_time_mark())
+            self._temp_file_1min = os.path.join(temp_file_loc, f'anemometer_1min.json')
+            self._temp_file_1hour = os.path.join(temp_file_loc, f'anemometer_1hour.json')
+            self._observations_1min.from_file(file_path=self._temp_file_1min, from_json=Impulse.from_json)
+            self._observations_1hour.from_file(file_path=self._temp_file_1hour, from_json=Impulse.from_json)
+
+        def run(self) -> None:
+            while not ExitEvent().is_set():
+                ExitEvent().wait(timeout=self.STORE_TEMP_DATA_EACH_S)
+                # store temp data
+                self._observations_1min.to_file(file_path=self._temp_file_1min, to_json=Impulse.to_json)
+                self._observations_1hour.to_file(file_path=self._temp_file_1hour, to_json=Impulse.to_json)
+
+            self.observed_pin.close()
+
+        def _on_signal(self, duration: float, pin: int):
+            _now = datetime.now()
+            _impulse = Impulse(time_mark=_now,
+                               duration_s=duration,
+                               time_since_previous_s=0.0 if self.last_observation_at is None
+                               else (_now - self.last_observation_at).total_seconds())
+            self.last_observation_at = _now
+            self._observations_1min.append(_impulse)
+            self._observations_1hour.append(_impulse)
+
+        def get_observations_1min(self) -> WindSpeedObservation:
+            return self._get_observations(self._observations_1min)
+
+        def get_observations_1hour(self) -> WindSpeedObservation:
+            return self._get_observations(self._observations_1hour)
+
+        def _get_observations(self, obs: TimeWindowList) -> WindSpeedObservation:
+            _wind_speed = obs.as_list()
+            if len(_wind_speed) == 0:
+                return WindSpeedObservation(average_speed=0, peak=0, variance=0, started_at=None, ended_at=None)
+
+            _tw = obs.time_window()
+            _duration = (_tw[1] - _tw[0]).total_seconds()
+
+            # the below defines the outliers for wind speed
+            # 200 kmph is an arbitrary number, taken out of thumb
+            _outliers = (0, 200)
+            _outliers_are_included = (False, False)
+
+            # WIND SPEED
+            # from documentation of the sensor:
+            # "a wind speed of 2.4km/h causes the switch to close once per second"
+
+            # Calculation the average is not so easy.
+            # The best option is to use the "count of impulses per period", but as the impulses can be
+            # stored\restored with gaps between, it is better to measure the average of momentary speeds
+            # Therefore, start with detecting if there are gaps
+            _momentary_speed = [
+                self.ONE_IMPULSE_PER_SEC_IS_KMPH/_imp.time_since_previous_s if _imp.time_since_previous_s > 0 else 0
+                for _imp in _wind_speed]
+            if min(_momentary_speed) == 0:
+                # calculate the average from momentary speeds
+                _average = stats.tmean(_momentary_speed, limits=_outliers, inclusive=_outliers_are_included)
+            else:
+                # there are no gaps in measurements; calculate the speed by couting all impulses within obs. window
+                _average = self.ONE_IMPULSE_PER_SEC_IS_KMPH * len(_wind_speed) / _duration
+
+            _variance = stats.tvar(_momentary_speed, limits=_outliers, inclusive=_outliers_are_included)
+            _peak = stats.tmax(_momentary_speed, upperlimit=_outliers[1], inclusive=_outliers_are_included[1])
+
+            return WindSpeedObservation(
+                average_speed=_average,
+                peak=_peak,
+                variance=_variance,
+                started_at=_tw[0], ended_at=_tw[1])
+
+    class WindDirectionObserver(Thread):
+        STORE_TEMP_DATA_EACH_S = 600
+
+        def __init__(self, parent: WeatherStationService, temp_file_loc: str, sleep_time_between_measures_s: float):
+            Thread.__init__(self)
+            self._parent_service = parent
+            self._temp_file_1min = os.path.join(temp_file_loc, f'windir_1min.json')
+            self._temp_file_1hour = os.path.join(temp_file_loc, f'windir_1hour.json')
+            self._observations_1min = TimeWindowList(
+                validity_time_s=WindObserver.DURATION_1MIN_S, get_time_mark_function=lambda x: x.get_time_mark())
+            self._observations_1hour = TimeWindowList(
+                validity_time_s=WindObserver.DURATION_1HOUR_S, get_time_mark_function=lambda x: x.get_time_mark())
+            self._observations_1min.from_file(file_path=self._temp_file_1min, from_json=WinDirReading.from_json)
+            self._observations_1hour.from_file(file_path=self._temp_file_1hour, from_json=WinDirReading.from_json)
+            self._temp_file_last_stored = datetime.now()
+            self._sleep_time_between_measures_s = sleep_time_between_measures_s
+            self._measurement_to_direction = {}
+            for _p in range(101):
+                if 45 < _p <= 50:
+                    self._measurement_to_direction[_p] = WindDirection.N
+                elif 50 < _p <= 54:
+                    self._measurement_to_direction[_p] = WindDirection.NE
+                elif 54 < _p <= 58:
+                    self._measurement_to_direction[_p] = WindDirection.E
+                elif 58 < _p <= 70:
+                    self._measurement_to_direction[_p] = WindDirection.NW
+                elif 70 < _p <= 77:
+                    self._measurement_to_direction[_p] = WindDirection.SE
+                elif 77 < _p <= 84:
+                    self._measurement_to_direction[_p] = WindDirection.W
+                elif 84 < _p <= 90:
+                    self._measurement_to_direction[_p] = WindDirection.SW
+                elif 90 < _p <= 99:
+                    self._measurement_to_direction[_p] = WindDirection.S
+                else:
+                    self._measurement_to_direction[_p] = WindDirection.UNKNOWN
+            self._unknown_readings = TimeWindowList(validity_time_s=60*60, get_time_mark_function=lambda x: x[1])
+
+        def run(self) -> None:
+            while not ExitEvent().is_set():
+                # read
+                _reading = self._read()
+                self._observations_1min.append(_reading)
+                self._observations_1hour.append(_reading)
+
+                ExitEvent().wait(timeout=self._sleep_time_between_measures_s)
+
+                if (datetime.now() - self._temp_file_last_stored).total_seconds() > self.STORE_TEMP_DATA_EACH_S \
+                        or ExitEvent().is_set():
+                    # store temp data
+                    self._observations_1min.to_file(file_path=self._temp_file_1min, to_json=WinDirReading.to_json)
+                    self._observations_1hour.to_file(file_path=self._temp_file_1hour, to_json=WinDirReading.to_json)
+                    self._temp_file_last_stored = datetime.now()
+
+        def _read(self) -> WinDirReading:
+            _raw_reading = int(self._parent_service.adc_device.read_percentile(2) / 10)
+            _direction = self._measurement_to_direction[_raw_reading]
+            if _direction == WindDirection.UNKNOWN:
+                self._unknown_readings.append((_raw_reading, datetime.now()))
+            return WinDirReading(
+                time_mark=datetime.now(),
+                direction=_direction
+            )
+
+        def get_dominant_direction_1min(self) -> WindDirectionObservation:
+            return self._get_dominant_direction(self._observations_1min)
+
+        def get_dominant_direction_1hour(self) -> WindDirectionObservation:
+            return self._get_dominant_direction(self._observations_1hour)
+
+        def unknown_readings_1hour(self) -> list:
+            return [_ur[0] for _ur in self._unknown_readings.as_list()]
+
+        def all_readings_1hour(self) -> list:
+            return [_r.direction for _r in self._observations_1hour.as_list()]
+
+        @staticmethod
+        def _get_dominant_direction(window_observations: TimeWindowList) -> WindDirectionObservation:
+            _observations = window_observations.as_list()
+            _tw = window_observations.time_window()
+            if len(_observations) == 0:
+                return WindDirectionObservation(
+                    dominant_direction=WindDirection.UNKNOWN,
+                    direction_variance=0,
+                    started_at=_tw[0], ended_at=_tw[1])
+
+            _counter = Counter([_obs.direction for _obs in _observations])
+            _dominant = _counter.most_common(1)
+            return WindDirectionObservation(
+                dominant_direction=_dominant[0][0],
+                direction_variance=100-int(100.0*_dominant[0][1]/len(_observations)),
+                started_at=_tw[0], ended_at=_tw[1])
+
+
+class RainGaugeObserver(Thread):
+
+    def __init__(self, parent: WeatherStationService, gauge_pin: int):
+        Thread.__init__(self)
+        self.parent = parent
+        self.observed_pin = StatelessButton(gauge_pin, self._on_signal)
+
+    def run(self) -> None:
+        ExitEvent().wait()
+        self.observed_pin.close()
+
+    def _on_signal(self, duration: float, pin: int):
+        # TODO what if the database is down? Maybe the process should be asynchronous?
+        db_bean = self.parent.store_rain_gauge_impulse()
+        self.parent.log.info(f'Impulse has been stored to database: {str(db_bean)}')
 
 
 class MultisensorReading:
@@ -819,8 +1155,6 @@ class MultisensorObserver(Thread):
 
             # mark start time
             time_mark = datetime.now()
-
-            self.parent_service.log.debug('Multisensor is up and measuring')
 
             try:
                 while not ExitEvent().is_set() \
@@ -948,6 +1282,7 @@ class RPiCoolDown(Thread):
                                               f'Stderr: [{exec_res.stderr.decode("utf-8")}]')
 
             ExitEvent().wait(self.probing_period)
+        self.fan.close()
 
 
 if __name__ == '__main__':
