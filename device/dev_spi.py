@@ -1,5 +1,5 @@
 import spidev
-from threading import Event
+from threading import Event, Lock
 from datetime import datetime
 from gpiozero import DigitalOutputDevice
 import RPi.GPIO as GPIO
@@ -11,13 +11,16 @@ class ADCDevice:
         self.adc.open(0, 0)
         self.adc.max_speed_hz = 1100000
         self.channels = (0x80, 0xC0)
+        self._lock = Lock()
 
     def read_percentile(self, channel_no: int) -> int:
         if channel_no not in (1, 2):
             raise ValueError(f'Internal error reading from ADC device. '
                              f'The channel number {channel_no} is invalid, only 1 or 2 are acceptable')
 
+        self._lock.acquire()
         raw = self.adc.xfer2([1, self.channels[channel_no-1], 0])
+        self._lock.release()
         ret = ((raw[1] & 0x0F) << 8) + (raw[2])
 
         return int(1000.0 * (1.0 - ret / 4096))

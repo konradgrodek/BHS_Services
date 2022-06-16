@@ -385,13 +385,13 @@ class IrrigationService(Service):
 
         return self.evaluation_period
 
-    def button_pressed(self, duration_in_seconds: float):
+    def button_pressed(self, duration_in_seconds: float, pin: int):
         if duration_in_seconds > self.button_off_threshold:
-            self.log.info(f"Received OFF (button pressed for {duration_in_seconds} seconds, "
+            self.log.info(f"Received OFF (button @ {pin} pressed for {duration_in_seconds} seconds, "
                           f"more than the threshold: {self.button_off_threshold})")
             self._thread.current_state.turn_off()
         else:
-            self.log.info(f"Received NEXT (button pressed for {duration_in_seconds}, "
+            self.log.info(f"Received NEXT (button @ {pin} pressed for {duration_in_seconds}, "
                           f"less than the OFF threshold: {self.button_off_threshold})")
             self._thread.current_state.goto_next()
 

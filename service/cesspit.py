@@ -242,7 +242,7 @@ class TankLevelService(Service):
                               f'mode: {current_level} [mm] ({self._get_fill_percentage(current_level):.2f} [%]), '
                               f'increase {last_reliable_reading.level - current_level} [mm],'
                               f'mean: {current_level_mean:.2f}, '
-                              f'variance: {stats.variation(measurements):.2f}, '
+                              f'var.coef.: {100.0*stats.variation(measurements):.2f}%, '
                               f'increase speed: {speed:.4f} [mmph]')
                 # signalize failure
                 self._react_on_failure()

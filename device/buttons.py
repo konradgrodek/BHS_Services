@@ -32,6 +32,6 @@ class StatelessButton(Button):
         :param arg:
         :return:
         """
-        duration = (datetime.now() - self.pressed_at).total_seconds()
-        self.button_pressed_handler(duration)
+        duration = (datetime.now() - self.pressed_at).total_seconds() if self.pressed_at is not None else 0
+        self.button_pressed_handler(duration, self.pin.number)
         self.pressed_at = None
