@@ -483,7 +483,7 @@ class WeatherStationService(Service):
         As a response RainGaugeObservationReadingJson will be jsonified and returned
         :return: FLASK JSON response
         """
-        return self.jsonify(self.rain_gauge_observer.current_observations())
+        return self.jsonify(self.rain_gauge_observer.get_current_observations())
 
 
 class AbstractIntensityObserver(Thread):
@@ -857,23 +857,27 @@ class WindObserver(Thread):
                     replace(minute=0, second=0, microsecond=0) - datetime.now()).total_seconds())
             # store the reading to database
             if not ExitEvent().is_set() and self.anemometer.last_observation_at is not None:
-                db_bean = self.parent.store_wind_observation()
-                self.parent.log.info(f'Wind observation stored to database: {str(db_bean)}')
+                try:
+                    db_bean = self.parent.store_wind_observation()
+                    self.parent.log.info(f'Wind observation stored to database: {str(db_bean)}')
 
-                _unknown_dir = self.direction.unknown_readings_1hour()
-                mc_unknown_dir_list = ",".join([f"{_mc}: {int(100*_mc[1]/len(_unknown_dir))}%"
-                                                for _mc in Counter(_unknown_dir).most_common(10)])
-                if db_bean.direction_dominant == WindDirection.UNKNOWN:
-                    self.parent.log.warning(f'There is a lot of unknown readings ({len(_unknown_dir)}): '
-                                            f'{mc_unknown_dir_list}')
-                else:
-                    self.parent.log.debug(f'There is {len(_unknown_dir)} unknown readings. '
-                                          f'Most common are: {mc_unknown_dir_list}')
+                    _unknown_dir = self.direction.unknown_readings_1hour()
+                    mc_unknown_dir_list = ",".join([f"{_mc}: {int(100*_mc[1]/len(_unknown_dir))}%"
+                                                    for _mc in Counter(_unknown_dir).most_common(10)])
+                    if db_bean.direction_dominant == WindDirection.UNKNOWN:
+                        self.parent.log.warning(f'There is a lot of unknown readings ({len(_unknown_dir)}): '
+                                                f'{mc_unknown_dir_list}')
+                    else:
+                        self.parent.log.debug(f'There is {len(_unknown_dir)} unknown readings. '
+                                              f'Most common are: {mc_unknown_dir_list}')
 
-                _all_dir_readings = self.direction.all_readings_1hour()
-                mc_all_dir_list = ",".join([f"{_mc[0].name}: {int(100*_mc[1]/len(_all_dir_readings))}%"
-                                            for _mc in Counter(_all_dir_readings).most_common()])
-                self.parent.log.debug(f'All detected directions: {mc_all_dir_list}')
+                    _all_dir_readings = self.direction.all_readings_1hour()
+                    mc_all_dir_list = ",".join([f"{_mc[0].name}: {int(100*_mc[1]/len(_all_dir_readings))}%"
+                                                for _mc in Counter(_all_dir_readings).most_common()])
+                    self.parent.log.debug(f'All detected directions: {mc_all_dir_list}')
+
+                except Exception as e:
+                    self.parent.log.critical(f'ERROR during storing wind observation: {str(e)}', exc_info=e)
 
         # wait for other threads to die
         self.anemometer.join()
@@ -1101,14 +1105,18 @@ class RainGaugeObserver(Thread):
         self.observed_pin.close()
 
     def _on_signal(self, duration: float, pin: int):
-        # TBC: what if the database is down? Maybe the process should be asynchronous?
-        db_bean = self.parent.store_rain_gauge_impulse()
-        self.parent.log.info(f'Impulse has been stored to database: {str(db_bean)}')
-        self.current_rain_observations.append(db_bean.period_start)
+        try:
+            # TBC: what if the database is down? Maybe the process should be asynchronous?
+            db_bean = self.parent.store_rain_gauge_impulse()
+            self.parent.log.info(f'Impulse has been stored to database: {str(db_bean)}')
+            self.current_rain_observations.append(db_bean.period_start)
+        except Exception as e:
+            self.parent.log.critical(f'ERROR during handling rain gauge signal: {str(e)}', exc_info=e)
 
-    def current_observations(self):
+    def get_current_observations(self):
         return RainGaugeObservationsReadingJson(
             observation_duration_h=self.current_rain_hours,
+            last_observation_at=self.current_rain_observations.oldest(),
             impulses=len(self.current_rain_observations.as_list()),
             timestamp=datetime.now())
 
