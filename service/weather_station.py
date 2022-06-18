@@ -80,6 +80,10 @@ class WeatherStationService(Service):
             section=rain_gauge_section,
             parameter='rain-gauge-pin',
             default=6)
+        rain_current_observations_last_hours = self.configuration.getIntConfigValue(
+            section=rain_gauge_section,
+            parameter='current-observations-last-hours',
+            default=12)
 
         multisensor_section = 'MULTISENSOR'
         multisensor_polling_period = self.configuration.getIntConfigValue(
@@ -152,7 +156,7 @@ class WeatherStationService(Service):
             wind_direction_measure_each_ms=wind_direction_measure_each_ms)
 
         self.rain_gauge_observer = RainGaugeObserver(
-            parent=self, gauge_pin=rain_gauge_pin)
+            parent=self, gauge_pin=rain_gauge_pin, current_rain_hours=rain_current_observations_last_hours)
 
         # cooling down fellow host
         self.fan_control = RPiCoolDown(
@@ -173,6 +177,8 @@ class WeatherStationService(Service):
                                    self.get_rest_response_humidity)
         self.rest_app.add_url_rule('/pressure', 'pressure',
                                    self.get_rest_response_pressure)
+        self.rest_app.add_url_rule('/rain', 'rain',
+                                   self.get_rest_response_rain)
 
     def main(self) -> float:
         """
@@ -470,6 +476,14 @@ class WeatherStationService(Service):
         :return: FLASK JSON response
         """
         return self.jsonify(self.wind_observer.get_current_observation())
+
+    def get_rest_response_rain(self):
+        """
+        This method will be called by REST interface upon an request for rain gauge (count of impulses) observation.
+        As a response RainGaugeObservationReadingJson will be jsonified and returned
+        :return: FLASK JSON response
+        """
+        return self.jsonify(self.rain_gauge_observer.current_observations())
 
 
 class AbstractIntensityObserver(Thread):
@@ -1067,19 +1081,36 @@ class WindObserver(Thread):
 
 class RainGaugeObserver(Thread):
 
-    def __init__(self, parent: WeatherStationService, gauge_pin: int):
+    def __init__(self, parent: WeatherStationService, gauge_pin: int, current_rain_hours: int):
         Thread.__init__(self)
         self.parent = parent
         self.observed_pin = StatelessButton(gauge_pin, self._on_signal)
+        self.current_rain_hours = current_rain_hours
+        self.current_rain_observations = TimeWindowList(
+            validity_time_s=current_rain_hours * 60 * 60, get_time_mark_function=lambda x: x)
 
     def run(self) -> None:
+        # restore the rain observations for last hours
+        self.current_rain_observations.extend(
+            self.parent.persistence.rain_observations_last_hours(
+                the_sensor=self.parent.get_rain_gauge_sensor(),
+                the_date=datetime.now(),
+                hours_in_the_past=self.current_rain_hours))
+
         ExitEvent().wait()
         self.observed_pin.close()
 
     def _on_signal(self, duration: float, pin: int):
-        # TODO what if the database is down? Maybe the process should be asynchronous?
+        # TBC: what if the database is down? Maybe the process should be asynchronous?
         db_bean = self.parent.store_rain_gauge_impulse()
         self.parent.log.info(f'Impulse has been stored to database: {str(db_bean)}')
+        self.current_rain_observations.append(db_bean.period_start)
+
+    def current_observations(self):
+        return RainGaugeObservationsReadingJson(
+            observation_duration_h=self.current_rain_hours,
+            impulses=len(self.current_rain_observations.as_list()),
+            timestamp=datetime.now())
 
 
 class MultisensorReading:
