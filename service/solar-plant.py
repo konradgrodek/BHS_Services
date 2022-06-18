@@ -277,7 +277,10 @@ class SolarPlantMonitor(Service):
             if _current_reading is not None:
                 _oldest_reading = self.oldest_successful_recorded_reading()
                 _current_daily_kWh = _current_reading.daily_kWh \
-                    if _current_reading.daily_kWh is not None else self.newest_successful_recorded_reading().daily_kWh
+                    if _current_reading.daily_kWh is not None \
+                    else self.newest_successful_recorded_reading().daily_kWh \
+                    if self.newest_successful_recorded_reading() is not None \
+                    else None
                 _previous_daily_kWh = _oldest_reading.daily_kWh \
                     if _oldest_reading is not None and _current_reading.timestamp > _oldest_reading.timestamp else 0
 
