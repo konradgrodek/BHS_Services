@@ -1116,8 +1116,7 @@ class RainGaugeObserver(Thread):
     def get_current_observations(self):
         return RainGaugeObservationsReadingJson(
             observation_duration_h=self.current_rain_hours,
-            last_observation_at=self.current_rain_observations.oldest(),
-            impulses=len(self.current_rain_observations.as_list()),
+            observations=self.current_rain_observations.as_list(),
             timestamp=datetime.now())
 
 
