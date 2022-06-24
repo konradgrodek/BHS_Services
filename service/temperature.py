@@ -252,10 +252,10 @@ class TemperatureService(Service):
 
         result = measurements[-1]
 
-        result.temperature = stats.mode([m.temperature for m in measurements], nan_policy='omit').mode[0]
         result.succeeded = sum([int(m.succeeded) for m in measurements]) > 0
 
         if result.succeeded:
+            result.temperature = stats.mode([m.temperature for m in measurements], nan_policy='omit').mode[0]
             self.log.info(f'Read {result.temperature} [\u2103] '
                           f'@ {self.get_human_readable_sensor_name(result.reference)}')
 
