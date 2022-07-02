@@ -252,10 +252,11 @@ class TemperatureService(Service):
 
         result = measurements[-1]
 
-        result.succeeded = sum([int(m.succeeded) for m in measurements]) > 0
+        succeeded_measurements = list(filter(lambda x: x.succeeded, measurements))
+        result.succeeded = len(succeeded_measurements) > 0
 
         if result.succeeded:
-            result.temperature = stats.mode([m.temperature for m in measurements], nan_policy='omit').mode[0]
+            result.temperature = stats.mode([m.temperature for m in succeeded_measurements], nan_policy='omit').mode[0]
             self.log.info(f'Read {result.temperature} [\u2103] '
                           f'@ {self.get_human_readable_sensor_name(result.reference)}')
 
@@ -276,7 +277,7 @@ class TemperatureService(Service):
             self.log.debug(f'Retrying to read temperature @ {self.get_human_readable_sensor_name(sensor_reference)} '
                            f'(attempt: {retry_count})')
 
-        success = None
+        success = False
         temp = None
         try:
             with open(device_file, 'r') as file:
@@ -291,13 +292,12 @@ class TemperatureService(Service):
                         self.log.debug(f'Sensor @ {device_file}, '
                                        f'last-modification: {sensor_last_modification}, '
                                        f'lines: {lines}')
-                        success = True if temp < 85.0 else False
+                        success = temp < 85.0
                         if success:
                             self.log.debug(
                                 f'Read {temp} [\u2103] @ {self.get_human_readable_sensor_name(sensor_reference)}'
                                 f'{"" if retry_count == 0 else ", attempt: "+str(retry_count)}')
                     else:
-                        success = False
                         self.log.error(f'Temperature reading @ {device_file} failed. '
                                        f'Cannot parse temperature from {lines[1]} using '
                                        f'pattern {self.device_file_re_pattern.pattern}. '

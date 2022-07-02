@@ -864,17 +864,17 @@ class WindObserver(Thread):
                     _unknown_dir = self.direction.unknown_readings_1hour()
                     mc_unknown_dir_list = ",".join([f"{_mc}: {int(100*_mc[1]/len(_unknown_dir))}%"
                                                     for _mc in Counter(_unknown_dir).most_common(10)])
-                    if db_bean.direction_dominant == WindDirection.UNKNOWN:
-                        self.parent.log.warning(f'There is a lot of unknown readings ({len(_unknown_dir)}): '
-                                                f'{mc_unknown_dir_list}')
-                    else:
-                        self.parent.log.debug(f'There is {len(_unknown_dir)} unknown readings. '
-                                              f'Most common are: {mc_unknown_dir_list}')
-
                     _all_dir_readings = self.direction.all_readings_1hour()
                     mc_all_dir_list = ",".join([f"{_mc[0].name}: {int(100*_mc[1]/len(_all_dir_readings))}%"
                                                 for _mc in Counter(_all_dir_readings).most_common()])
-                    self.parent.log.debug(f'All detected directions: {mc_all_dir_list}')
+                    if db_bean.direction_dominant == WindDirection.UNKNOWN.value:
+                        self.parent.log.warning(f'There is a lot of wind direction unknown readings '
+                                                f'({len(_unknown_dir)}): {mc_unknown_dir_list}')
+                        self.parent.log.info(f'All detected directions: {mc_all_dir_list}')
+                    else:
+                        self.parent.log.debug(f'There is {len(_unknown_dir)} unknown wind direction readings. '
+                                              f'Most common are: {mc_unknown_dir_list}')
+                        self.parent.log.debug(f'All detected directions: {mc_all_dir_list}')
 
                 except Exception as e:
                     self.parent.log.critical(f'ERROR during storing wind observation: {str(e)}', exc_info=e)
@@ -952,7 +952,8 @@ class WindObserver(Thread):
         def _get_observations(self, obs: TimeWindowList) -> WindSpeedObservation:
             _wind_speed = obs.as_list()
             if len(_wind_speed) == 0:
-                return WindSpeedObservation(average_speed=0, peak=0, variance=0, started_at=None, ended_at=None)
+                return WindSpeedObservation(
+                    average_speed=0, peak=0, variance=0, started_at=datetime.now(), ended_at=datetime.now())
 
             _tw = obs.time_window()
             _duration = (_tw[1] - _tw[0]).total_seconds()
@@ -978,7 +979,7 @@ class WindObserver(Thread):
                 _average = stats.tmean(_momentary_speed, limits=_outliers, inclusive=_outliers_are_included)
             else:
                 # there are no gaps in measurements; calculate the speed by couting all impulses within obs. window
-                _average = self.ONE_IMPULSE_PER_SEC_IS_KMPH * len(_wind_speed) / _duration
+                _average = (self.ONE_IMPULSE_PER_SEC_IS_KMPH * len(_wind_speed) / _duration) if _duration > 0 else 0
 
             _variance = stats.tvar(_momentary_speed, limits=_outliers, inclusive=_outliers_are_included)
             _peak = stats.tmax(_momentary_speed, upperlimit=_outliers[1], inclusive=_outliers_are_included[1])
@@ -1007,7 +1008,7 @@ class WindObserver(Thread):
             self._sleep_time_between_measures_s = sleep_time_between_measures_s
             self._measurement_to_direction = {}
             for _p in range(101):
-                if 45 < _p <= 50:
+                if 35 < _p <= 50:
                     self._measurement_to_direction[_p] = WindDirection.N
                 elif 50 < _p <= 54:
                     self._measurement_to_direction[_p] = WindDirection.NE
