@@ -48,6 +48,9 @@ class TankLevelService(Service):
             section=self.tank_level_section,
             parameter='tank-full-level', default=590)
 
+        self.rest_app.add_url_rule('/', 'config',
+                                   self.get_rest_response_config)
+
     def get_polling_period(self) -> int:
         pp = self.get_the_sensor().polling_period
         return pp if pp else self._default_polling_period
@@ -204,3 +207,8 @@ class TankLevelService(Service):
 
     def react_on_level(self, fill_percentage):
         pass
+
+    def get_rest_response_config(self):
+        return self.jsonify(TankConfigJson(
+            full_level_mm=self.tank_full_level,
+            empty_level_mm=self.tank_empty_level))

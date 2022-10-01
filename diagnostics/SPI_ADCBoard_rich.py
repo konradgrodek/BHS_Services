@@ -1,10 +1,11 @@
 import spidev
 from os import system
-import sys
-import time
-from datetime import datetime
+from time import sleep
 from gpiozero import DigitalOutputDevice, DigitalInputDevice
 from threading import Event
+from rich.table import Table
+from rich.live import Live
+from datetime import datetime
 
 # gain channel
 ADS1256_GAIN_E = {'ADS1256_GAIN_1' : 0, # GAIN   1
@@ -75,6 +76,7 @@ class ADCBoard:
         self.pin_reset = DigitalOutputDevice(18, active_high=False)
         self.pin_drdy = DigitalInputDevice(17)
         self.pin_cs = DigitalOutputDevice(22, active_high=False)
+        self.chip_id = -1
 
         self.exit_event = Event()
 
@@ -141,10 +143,9 @@ class ADCBoard:
         self.adc.max_speed_hz = 20000
         self.adc.mode = 0b01
         self.reset()
-        chip_id = self.get_chip_id()
-        print(f'Chip-id: {chip_id}')
+        self.chip_id = self.get_chip_id()
         self.config(ADS1256_GAIN_E['ADS1256_GAIN_1'], ADS1256_DRATE_E['ADS1256_30000SPS'])
-        return chip_id
+        return self.chip_id
 
     def read_adc(self, ch):
         self.set_channel(ch)
@@ -168,40 +169,46 @@ class ADCBoard:
 
 if __name__ == '__main__':
 
+    system('clear')
+
     adc_converter = ADCBoard()
     adc_converter.init()
 
-    while True:
-        time.sleep(0.2)
+    _min = 325000
+    _max = 4989000
 
-        mark = datetime.now()
+    def update_table() -> Table:
         results_raw = {}
-        for channel in range(8):
+        mark = datetime.now()
+
+        for _channel in range(8):
             try:
-                res = adc_converter.read_adc(channel)
-                results_raw[channel] = res if res is not None else 0
-            except TimeoutError as e:
-                print(f'Error reading (timeout) {str(e)}')
+                res = adc_converter.read_adc(_channel)
+                results_raw[_channel] = res
+            except TimeoutError:
+                results_raw[_channel] = 0
 
-        system('clear')
-        print(f'ADC Converter Board')
+        table = Table(title=f'ADC Converter, chip-id: {adc_converter.chip_id}',
+                      caption=f'Measure time {int((datetime.now() - mark).total_seconds()*1000):04} ms')
+        table.add_column('Channel')
+        table.add_column('Raw value')
+        table.add_column('Voltage')
+        table.add_column('Result raw')
+        table.add_column('Result transf.')
 
-        _min = 220000
-        _max = 4420000
+        for _channel in results_raw:
+            _raw = results_raw[_channel]
+            _result_perc = 100 * _raw / 0x7fffff
+            _result_v = 3.3 * _raw / 0x7fffff
+            _result_transformed = 100 * (_raw - _min) / (_max - _min)
+            table.add_row(str(_channel), f'{_raw:010}', f'{_result_v:4.2f}', f'{_result_perc:4.2f}', f'{_result_transformed:4.2f}')
 
-        for channel in results_raw:
-            res = results_raw[channel]
-            result_perc = 100 * res / 0x7fffff
-            result_v = 3.3 * res / 0x7fffff
-            result_transformed = 100 * (res - _min) / (_max - _min)
+        return table
 
-            print(f'Channel {channel}'
-                  f'\t{res:010}'
-                  f'\t{result_v:4.4} [V]'
-                  f'\t{result_perc:4.4}%'
-                  f'\t{result_transformed:4.4}%')
-
-        print(f'Measure time {int((datetime.now() - mark).total_seconds()*1000):04} ms')
+    with Live(update_table(), refresh_per_second=4) as live:
+        while 1 == 1:
+            sleep(0.2)
+            live.update(update_table())
 
 
 
