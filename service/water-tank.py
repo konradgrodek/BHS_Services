@@ -17,7 +17,7 @@ class WaterTankLevelService(TankLevelService):
     def get_the_sensor_reference(self) -> str:
         return WATER_TANK_THE_SENSOR_REFERENCE
 
-    def is_reliable(self, current_level: int, last_reliable_reading: TankLevel) -> bool:
+    def is_reliable(self, current_level: int, current_readings_mean: float, last_reliable_reading: TankLevel) -> bool:
         return True
 
     def get_rest_response_current_reading(self):

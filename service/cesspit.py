@@ -56,6 +56,9 @@ class CesspitLevelService(TankLevelService):
         self.reliable_level_increase_per_hour = self.configuration.getIntConfigValue(
             section=self.tank_level_section,
             parameter='reliable-level-increase-per-hour', default=20)
+        self.max_acceptable_mode_mean_diff = self.configuration.getIntConfigValue(
+            section=self.tank_level_section,
+            parameter='max-acceptable-mode-mean-diff-mm', default=10)
 
         pin_led_R = self.configuration.getIntConfigValue(
             section=self.tank_level_section,
@@ -91,7 +94,11 @@ class CesspitLevelService(TankLevelService):
     def get_the_sensor_reference(self) -> str:
         return CESSPIT_THE_SENSOR_REFERENCE
 
-    def is_reliable(self, current_level: int, last_reliable_reading: TankLevel) -> bool:
+    def is_reliable(self, current_level: int, current_readings_mean: float, last_reliable_reading: TankLevel) -> bool:
+        # detect withdrawal:
+        if abs(current_level - current_readings_mean) > self.max_acceptable_mode_mean_diff:
+            return False
+
         # the decrease is always reliable
         if not last_reliable_reading or self._increase(current_level, last_reliable_reading.level) <= 0:
             return True

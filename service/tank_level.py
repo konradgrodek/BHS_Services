@@ -48,7 +48,7 @@ class TankLevelService(Service):
             section=self.tank_level_section,
             parameter='tank-full-level', default=590)
 
-        self.rest_app.add_url_rule('/', 'config',
+        self.rest_app.add_url_rule('/config', 'tank_min_max_configuration',
                                    self.get_rest_response_config)
 
     def get_polling_period(self) -> int:
@@ -94,8 +94,8 @@ class TankLevelService(Service):
             last_reliable_reading = self.get_last_reliable_reading()
             last_stored_reading = self.get_last_stored_reading()
 
-            if self.is_reliable(current_level, last_reliable_reading) \
-                    or self.is_reliable(current_level, last_stored_reading):
+            if self.is_reliable(current_level, current_readings_mean, last_reliable_reading) \
+                    or self.is_reliable(current_level, current_readings_mean, last_stored_reading):
                 self.log.info(f'OK {len(measurements)} measurements, '
                               f'mode: {current_level} [mm] ({self.get_fill_percentage(current_level):.2f} [%]), '
                               f'mean: {current_readings_mean:.2f}, '
@@ -182,7 +182,7 @@ class TankLevelService(Service):
             level = self.get_last_stored_reading().level
         return int(10000.0*(self.tank_empty_level-level)/(self.tank_empty_level-self.tank_full_level))/100.0
 
-    def is_reliable(self, current_level: int, last_reliable_reading: TankLevel) -> bool:
+    def is_reliable(self, current_level: int, current_readings_mean: float, last_reliable_reading: TankLevel) -> bool:
         raise NotImplementedError()
 
     def do_store_reading(self, current_level: int, last_stored_reading: TankLevel) -> bool:
