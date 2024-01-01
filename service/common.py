@@ -168,10 +168,16 @@ class Service:
             host=self.configuration.getDbHost(),
             exit_event=ExitEvent())
         self._hostname = None
+        self._main_activity_state = ServiceActivityJson(
+            name=f"{self.provideName()}-main",
+            state=ServiceActivityState.STARTING
+        )
         port = self.configuration.getRestPort()
         if port > 0:
             self.rest_app = Flask('service/common')
             self.rest_server = RestServer(port, self.rest_app)
+            self.rest_app.add_url_rule('/hc', 'service_health_check',
+                                       self.get_rest_response_health_check)
         else:
             self.rest_server = None
 
@@ -191,13 +197,20 @@ class Service:
             logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
         while not ExitEvent().is_set():
-            wait_time = self.main()
+            self._update_main_activity_state(ServiceActivityState.OK)
+            try:
+                wait_time = self.main()
+            except Exception as e:
+                self.log.error('Fatal error detected in main loop', exc_info=e)
+                self._update_main_activity_state(ServiceActivityState.DEAD, message=str(e))
+                break
             if wait_time and wait_time > 0:
                 try:
                     ExitEvent().wait(wait_time)
                 except KeyboardInterrupt:  # this is just for proper handling of stop in debug mode
                     ExitEvent().set()
 
+        self._update_main_activity_state(ServiceActivityState.DEAD, message=self._main_activity_state.message)
         self._cleanup()
         self.log.info('All done. Bye')
 
@@ -210,6 +223,11 @@ class Service:
         if self.rest_server:
             self.rest_server.shutdown()
         self.cleanup()
+
+    def _update_main_activity_state(self, state: ServiceActivityState, message: str = None):
+        self._main_activity_state.state = state
+        self._main_activity_state.timestamp = datetime.now()
+        self._main_activity_state.message = message
 
     # interface
 
@@ -233,6 +251,22 @@ class Service:
         :return:
         """
         pass
+
+    def service_activities_states(self) -> list:
+        """
+        Override this method to add states of service sub-activities.
+        :return: list of ServiceActivityJson
+        """
+        return []
+
+    # health check
+    def get_rest_response_health_check(self):
+        return self.jsonify(
+            ServiceStateJson(
+                name=self.provideName(),
+                activities_state=[self._main_activity_state] + self.service_activities_states()
+            )
+        )
 
     # useful methods
 

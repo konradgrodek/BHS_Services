@@ -31,6 +31,9 @@ class SpeedtestService(Service):
             section=speedtest_section,
             parameter='speedtest-timeout')
 
+        self.rest_app.add_url_rule('/', 'current',
+                                   self.get_rest_response_current_reading)
+
     def _get_sensor(self) -> Sensor:
         if not self.the_speedtest_sensor:
             self.the_speedtest_sensor = self.persistence.get_sensor(SENSORTYPE_SPEEDTEST,SPEEDTEST_THE_SENSOR_REFERENCE)
@@ -166,6 +169,21 @@ class SpeedtestService(Service):
         # this must correspond with installation configuration
         # see deployment/install/speedtest.install.ini, section 'GENERAL', option 'short-name'
         return 'speedtest'
+
+    def get_rest_response_current_reading(self):
+        if self.the_last_reading is None:
+            return self.jsonify(NotAvailableJsonBean())
+        return self.jsonify(
+            SpeedtestReadingJson(
+                ping_succeeded=self.the_last_ping_result,
+                ping_microsec=self.the_last_reading.ping,
+                jitter_microsec=self.the_last_reading.jitter,
+                download_kbps=self.the_last_reading.download,
+                upload_kbps=self.the_last_reading.upload,
+                external_ip=self.the_last_reading.external_ip,
+                timestamp=self.the_last_reading.timestamp,
+            )
+        )
 
 
 if __name__ == '__main__':
