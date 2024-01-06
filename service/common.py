@@ -14,6 +14,7 @@ from werkzeug.serving import make_server
 from threading import Thread
 
 from core.bean import *
+from core.util import ExitEvent
 from persistence.schema import *
 
 
@@ -130,15 +131,6 @@ class RestServer(Thread):
 
     def shutdown(self):
         self.server.shutdown()
-
-
-class ExitEvent(Event):
-    _instance = None
-
-    def __new__(cls):
-        if not cls._instance:
-            cls._instance = Event()
-        return cls._instance
 
 
 class Service:
