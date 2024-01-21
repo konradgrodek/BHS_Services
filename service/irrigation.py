@@ -70,6 +70,7 @@ class IrrigationState:
         self.config = config
         self.next = None
         self.termination_event = Event()
+        self.started_at = datetime.now()
 
     def is_idle(self) -> bool:
         """
@@ -367,6 +368,9 @@ class IrrigationService(Service):
         self.button = StatelessButton(pin_button, self.button_pressed)
         self._thread = IrrigationServiceThread(self.outputs, self.log, self.irrigation_config)
 
+        self.rest_app.add_url_rule('/', 'current',
+                                   self.get_rest_response_current_activity)
+
     def main(self) -> float:
         """
         One iteration of main loop of the service. Obligated to return sleep time in seconds
@@ -399,6 +403,14 @@ class IrrigationService(Service):
         self.button.close()
         self._thread.interrupt()
         self._thread.join()
+
+    def get_rest_response_current_activity(self):
+        return self.jsonify(
+            IrrigationStateJson(
+                is_on=not self._thread.current_state.is_idle(),
+                started_at=self._thread.current_state.started_at
+            )
+        )
 
 
 if __name__ == '__main__':

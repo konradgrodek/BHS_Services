@@ -1,5 +1,6 @@
 from array import array
 from scipy import stats
+from collections import deque
 
 from service.common import *
 from persistence.schema import *
@@ -48,8 +49,16 @@ class TankLevelService(Service):
             section=self.tank_level_section,
             parameter='tank-full-level', default=590)
 
+        self._shared_log = deque(maxlen=self.configuration.getIntConfigValue(
+            section=self.tank_level_section,
+            parameter='log-max-length', default=5)
+        )
+
         self.rest_app.add_url_rule('/config', 'tank_min_max_configuration',
                                    self.get_rest_response_config)
+
+        self.rest_app.add_url_rule('/log', 'measurements_log',
+                                   self.get_rest_response_log)
 
     def get_polling_period(self) -> int:
         pp = self.get_the_sensor().polling_period
@@ -96,10 +105,12 @@ class TankLevelService(Service):
 
             if self.is_reliable(current_level, current_readings_mean, last_reliable_reading) \
                     or self.is_reliable(current_level, current_readings_mean, last_stored_reading):
-                self.log.info(f'OK {len(measurements)} measurements, '
-                              f'mode: {current_level} [mm] ({self.get_fill_percentage(current_level):.2f} [%]), '
-                              f'mean: {current_readings_mean:.2f}, '
-                              f'variance.: {current_readings_var_perc:.2f}%')
+                _msg = f'OK {len(measurements)} measurements, '\
+                       f'mode: {current_level} [mm] ({self.get_fill_percentage(current_level):.2f} [%]), '\
+                       f'mean: {current_readings_mean:.2f}, '\
+                       f'variance.: {current_readings_var_perc:.2f}%'
+                self.log.info(_msg)
+                self._shared_log.append(_msg)
 
                 self.set_last_reliable_reading(current_level)
 
@@ -111,17 +122,21 @@ class TankLevelService(Service):
             else:
                 speed = (last_reliable_reading.level - current_level) / \
                         ((datetime.now() - last_reliable_reading.timestamp).total_seconds()/3600)
-                self.log.info(f'UNRELIABLE! {len(measurements)} measurements, '
-                              f'mode: {current_level} [mm] ({self.get_fill_percentage(current_level):.2f} [%]), '
-                              f'increase {last_reliable_reading.level - current_level} [mm],'
-                              f'mean: {current_readings_mean:.2f}, '
-                              f'variance.: {current_readings_var_perc:.2f}%, '
-                              f'increase speed: {speed:.4f} [mmph]')
+                _msg = f'UNRELIABLE! {len(measurements)} measurements, '\
+                       f'mode: {current_level} [mm] ({self.get_fill_percentage(current_level):.2f} [%]), '\
+                       f'increase {last_reliable_reading.level - current_level} [mm],'\
+                       f'mean: {current_readings_mean:.2f}, '\
+                       f'variance.: {current_readings_var_perc:.2f}%, '\
+                       f'increase speed: {speed:.4f} [mmph]'
+                self.log.info(_msg)
+                self._shared_log.append(_msg)
                 # signalize failure
                 self.react_on_failure()
 
         else:
-            self.log.critical(f"All attempts to measure the level failed")
+            _msg = f"All attempts to measure the level failed"
+            self.log.critical(_msg)
+            self._shared_log.append(_msg)
             self.react_on_failure()
 
         return self.get_polling_period() - (datetime.now() - start_mark).total_seconds()
@@ -212,3 +227,11 @@ class TankLevelService(Service):
         return self.jsonify(TankConfigJson(
             full_level_mm=self.tank_full_level,
             empty_level_mm=self.tank_empty_level))
+
+    def get_rest_response_log(self):
+        return self.jsonify(
+            ServiceLogJson(
+                service_name=self.provideName(),
+                log_entries=list(self._shared_log)
+            )
+        )
