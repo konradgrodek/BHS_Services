@@ -188,8 +188,8 @@ class Service:
             self.log.info(f'REST Service started @ {self.configuration.getRestPort()}')
             logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
+        self._update_main_activity_state(ServiceActivityState.OK, "Started.")
         while not ExitEvent().is_set():
-            self._update_main_activity_state(ServiceActivityState.OK)
             try:
                 wait_time = self.main()
             except Exception as e:

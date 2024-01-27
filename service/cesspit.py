@@ -32,17 +32,17 @@ class LedSignal:
     def green_blink(self, count):
         self.R.off()
         self.B.off()
-        self.G.blink(on_time=0.2, off_time=0.1, n=count)
+        self.G.blink(on_time=0.7, off_time=0.3, n=count)
 
     def blue_blink(self):
         self.R.off()
         self.G.off()
-        self.B.blink(on_time=0.2, off_time=0.1)
+        self.B.blink(on_time=0.3, off_time=0.1)
 
     def red_blink(self):
         self.B.off()
         self.G.off()
-        self.R.blink(on_time=0.2, off_time=0.1)
+        self.R.blink(on_time=0.3, off_time=0.1)
 
 
 class CesspitLevelService(TankLevelService):

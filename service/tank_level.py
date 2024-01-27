@@ -86,7 +86,9 @@ class TankLevelService(Service):
         while (datetime.now() - start_mark).total_seconds() < self.measure_duration and not ExitEvent().is_set():
             try:
                 attempt += 1
-                measurements.append(self.measure())
+                m = self.measure()
+                if m > 250:
+                    measurements.append(m)
             except DistanceMeasureException as exception:
                 self.log.critical(f'Unsuccessful {attempt} attempt to measure, details: {exception.message}')
             if self.measure_attempts_pause_time > 0:
@@ -105,7 +107,8 @@ class TankLevelService(Service):
 
             if self.is_reliable(current_level, current_readings_mean, last_reliable_reading) \
                     or self.is_reliable(current_level, current_readings_mean, last_stored_reading):
-                _msg = f'{datetime.now().strftime("%H:%M:%S")} OK {len(measurements)} measurements, '\
+                _msg = f'{datetime.now().strftime("%H:%M:%S")} OK {len(measurements)} measurements ' \
+                       f'({100*len(measurements)/attempt:.1f} % succeeded), '\
                        f'mode: {current_level} [mm] ({self.get_fill_percentage(current_level):.2f} [%]), '\
                        f'mean: {current_readings_mean:.2f}, '\
                        f'variance.: {current_readings_var_perc:.2f}%'
@@ -119,10 +122,16 @@ class TankLevelService(Service):
 
                 self.react_on_level(self.get_fill_percentage())
 
+                self._update_main_activity_state(
+                    ServiceActivityState.OK if len(measurements)/attempt > 0.5 else ServiceActivityState.WARNING,
+                    message=_msg
+                )
+
             else:
                 speed = (last_reliable_reading.level - current_level) / \
                         ((datetime.now() - last_reliable_reading.timestamp).total_seconds()/3600)
-                _msg = f'{datetime.now().strftime("%H:%M:%S")} UNRELIABLE! {len(measurements)} measurements, '\
+                _msg = f'{datetime.now().strftime("%H:%M:%S")} UNRELIABLE! {len(measurements)} measurements ' \
+                       f'({100*len(measurements)/attempt:.1f} % succeeded), '\
                        f'mode: {current_level} [mm] ({self.get_fill_percentage(current_level):.2f} [%]), '\
                        f'increase {last_reliable_reading.level - current_level} [mm],'\
                        f'mean: {current_readings_mean:.2f}, '\
@@ -131,13 +140,13 @@ class TankLevelService(Service):
                 self.log.info(_msg)
                 self._shared_log.append(_msg)
                 # signalize failure
-                self.react_on_failure()
+                self.react_on_failure(_msg)
 
         else:
             _msg = f"{datetime.now().strftime('%H:%M:%S')} All attempts to measure the level failed"
             self.log.critical(_msg)
             self._shared_log.append(_msg)
-            self.react_on_failure()
+            self.react_on_failure(_msg)
 
         return self.get_polling_period() - (datetime.now() - start_mark).total_seconds()
 
@@ -217,8 +226,11 @@ class TankLevelService(Service):
         """
         return previous_level - current_level
 
-    def react_on_failure(self):
-        pass
+    def react_on_failure(self, msg: str = None):
+        self._update_main_activity_state(
+            ServiceActivityState.WARNING,
+            message=msg if msg is not None else self._main_activity_state.message
+        )
 
     def react_on_level(self, fill_percentage):
         pass
