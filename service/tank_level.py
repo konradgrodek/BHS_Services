@@ -105,7 +105,7 @@ class TankLevelService(Service):
 
             if self.is_reliable(current_level, current_readings_mean, last_reliable_reading) \
                     or self.is_reliable(current_level, current_readings_mean, last_stored_reading):
-                _msg = f'OK {len(measurements)} measurements, '\
+                _msg = f'{datetime.now().strftime("%H:%M:%S")} OK {len(measurements)} measurements, '\
                        f'mode: {current_level} [mm] ({self.get_fill_percentage(current_level):.2f} [%]), '\
                        f'mean: {current_readings_mean:.2f}, '\
                        f'variance.: {current_readings_var_perc:.2f}%'
@@ -122,7 +122,7 @@ class TankLevelService(Service):
             else:
                 speed = (last_reliable_reading.level - current_level) / \
                         ((datetime.now() - last_reliable_reading.timestamp).total_seconds()/3600)
-                _msg = f'UNRELIABLE! {len(measurements)} measurements, '\
+                _msg = f'{datetime.now().strftime("%H:%M:%S")} UNRELIABLE! {len(measurements)} measurements, '\
                        f'mode: {current_level} [mm] ({self.get_fill_percentage(current_level):.2f} [%]), '\
                        f'increase {last_reliable_reading.level - current_level} [mm],'\
                        f'mean: {current_readings_mean:.2f}, '\
@@ -134,7 +134,7 @@ class TankLevelService(Service):
                 self.react_on_failure()
 
         else:
-            _msg = f"All attempts to measure the level failed"
+            _msg = f"{datetime.now().strftime('%H:%M:%S')} All attempts to measure the level failed"
             self.log.critical(_msg)
             self._shared_log.append(_msg)
             self.react_on_failure()
