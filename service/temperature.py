@@ -86,14 +86,22 @@ class TemperatureService(Service):
                                    self.get_rest_response_realtime_temperature_readings)
 
         self.reading_lock = Lock()
+        self.main_activity_state.name = f"{self.provideName()}@{self.get_hostname()}"
 
     def main(self) -> float:
         """
         One iteration of main loop of the service.
-        Suppose to return sleep time in seconds
+        Supposed to return sleep time in seconds
         """
         mark = datetime.now()
         self.read_and_store_temperature()
+        self.main_activity_state.all_fine(
+            f"Measured temperatures: " + ', '.join([
+                f'{_r.sensor.location}: {_r.temperature:.1f}'
+                for _r in [self.get_last_temperature_reading(_sensor)
+                           for _sensor in self.get_local_active_sensors()]
+            ])
+        )
 
         return self.polling_period - (datetime.now() - mark).total_seconds()
 

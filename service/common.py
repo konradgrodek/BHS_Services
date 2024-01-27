@@ -133,6 +133,56 @@ class RestServer(Thread):
         self.server.shutdown()
 
 
+class ActivityState(ServiceActivityJson):
+    """
+    A wraper for bean object keeping health-check response of an activity of a service.
+    Provides utilitarian methods that allow the services / activities to keep a single instance
+    and modify the state with easy calls.
+    """
+
+    def __init__(self, name: str):
+        """
+        Initializes the object with state = STARTING and the provided name of the activity
+        :param name: the name of the activity
+        """
+        ServiceActivityJson.__init__(self, name, ServiceActivityState.STARTING)
+
+    def update(self, state: ServiceActivityState, msg: str = None):
+        """
+        Updates the state of activity. Sets provided state and message, the timestamp is set to _now_
+        :param state: the new state
+        :param msg: the optional message
+        :return: None
+        """
+        self.timestamp = datetime.now()
+        self.message = msg
+        self.state = state
+
+    def mark_dead(self, msg: str = None):
+        """
+        Sets DEAD as the current state.
+        :param msg: optional message
+        :return: NOne
+        """
+        self.update(ServiceActivityState.DEAD, msg)
+
+    def all_fine(self, msg: str = None):
+        """
+        Sets OK as the current state.
+        :param msg: optional detailed message
+        :return: None
+        """
+        self.update(ServiceActivityState.OK, msg)
+
+    def warn(self, msg: str = None):
+        """
+        Sets WARNING as the current state
+        :param msg: the optional detailed message
+        :return: None
+        """
+        self.update(ServiceActivityState.WARNING, msg)
+
+
 class Service:
     """
     Base class for all Black House Sentry services
@@ -160,10 +210,7 @@ class Service:
             host=self.configuration.getDbHost(),
             exit_event=ExitEvent())
         self._hostname = None
-        self._main_activity_state = ServiceActivityJson(
-            name=f"{self.provideName()}-main",
-            state=ServiceActivityState.STARTING
-        )
+        self.main_activity_state = ActivityState(name=f"{self.provideName()}-main")
         port = self.configuration.getRestPort()
         if port > 0:
             self.rest_app = Flask('service/common')
@@ -188,13 +235,13 @@ class Service:
             self.log.info(f'REST Service started @ {self.configuration.getRestPort()}')
             logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
-        self._update_main_activity_state(ServiceActivityState.OK, "Started.")
+        self.main_activity_state.all_fine("Started.")
         while not ExitEvent().is_set():
             try:
                 wait_time = self.main()
             except Exception as e:
                 self.log.error('Fatal error detected in main loop', exc_info=e)
-                self._update_main_activity_state(ServiceActivityState.DEAD, message=str(e))
+                self.main_activity_state.mark_dead(str(e))
                 break
             if wait_time and wait_time > 0:
                 try:
@@ -202,7 +249,7 @@ class Service:
                 except KeyboardInterrupt:  # this is just for proper handling of stop in debug mode
                     ExitEvent().set()
 
-        self._update_main_activity_state(ServiceActivityState.DEAD, message=self._main_activity_state.message)
+        self.main_activity_state.mark_dead("Peacefully deceased")
         self._cleanup()
         self.log.info('All done. Bye')
 
@@ -215,11 +262,6 @@ class Service:
         if self.rest_server:
             self.rest_server.shutdown()
         self.cleanup()
-
-    def _update_main_activity_state(self, state: ServiceActivityState, message: str = None):
-        self._main_activity_state.state = state
-        self._main_activity_state.timestamp = datetime.now()
-        self._main_activity_state.message = message
 
     # interface
 
@@ -256,7 +298,7 @@ class Service:
         return self.jsonify(
             ServiceStateJson(
                 name=self.provideName(),
-                activities_state=[self._main_activity_state] + self.service_activities_states()
+                activities_state=[self.main_activity_state] + self.service_activities_states()
             )
         )
 

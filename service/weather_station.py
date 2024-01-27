@@ -222,6 +222,14 @@ class WeatherStationService(Service):
     def provideName(self):
         return 'weather_station'
 
+    def service_activities_states(self):
+        return [
+            self.luminosity_observer.activity_state,
+            self.multisensor_observer.activity_state,
+            self.fan_control.activity_state,
+            self.rain_gauge_observer.activity_state
+        ] + self.wind_observer.activities_states()
+
     def measure_air_quality(self):
         """
         Method responsible for performing Air Quality Scan and storing results to database
@@ -522,6 +530,7 @@ class AbstractIntensityObserver(Thread):
             self.observation_start_threshold_per_mille - int(threshold_hysteresis * 10)
         self.observation_minimum_duration_seconds = min_duration_s
         self.observation_outliers_count = 0
+        self.activity_state = ActivityState(type(self).__name__)
 
     def run(self):
         """
@@ -529,32 +538,40 @@ class AbstractIntensityObserver(Thread):
         Once finished, the thread is dead and cannot be resumed.
         :return:
         """
-        while not ExitEvent().is_set():
-            measurement = self.measure()
+        try:
+            while not ExitEvent().is_set():
+                measurement = self.measure()
 
-            # it is assumed that 100% is not reachable, therefore indicates error
-            self.failure = measurement == 1000
-            if self.failure:
-                continue
+                # it is assumed that 100% is not reachable, therefore indicates error
+                self.failure = measurement == 1000
+                if self.failure:
+                    self.activity_state.warn('Invalid measurement of 100%')
+                    continue
 
-            current_state = self.is_active(measurement)
+                self.activity_state.all_fine(f'OK. Measured {measurement}')
 
-            if current_state != self.is_observation_active:
+                current_state = self.is_active(measurement)
 
-                if current_state:
-                    self.init_measure(measurement)
+                if current_state != self.is_observation_active:
 
-                if not current_state:
-                    self.close_measure((datetime.now() - self.active_observations_since).total_seconds())
+                    if current_state:
+                        self.init_measure(measurement)
 
-                self.is_observation_active = current_state
+                    if not current_state:
+                        self.close_measure((datetime.now() - self.active_observations_since).total_seconds())
 
-            if self.is_observation_active:
-                self.active_observations.append(measurement)
+                    self.is_observation_active = current_state
 
-            self.current_observations.append(measurement)
+                if self.is_observation_active:
+                    self.active_observations.append(measurement)
 
-            ExitEvent().wait(self.sleep_time_between_measures_s)
+                self.current_observations.append(measurement)
+
+                ExitEvent().wait(self.sleep_time_between_measures_s)
+            self.activity_state.mark_dead("Peacefully deceased")
+
+        except Exception as e:
+            self.activity_state.mark_dead(f'Violently interrupted by {str(e)}')
 
     def measure(self) -> int:
         """
@@ -841,6 +858,7 @@ class WindObserver(Thread):
             parent=parent,
             temp_file_loc=temp_file_loc,
             sleep_time_between_measures_s=wind_direction_measure_each_ms/1000)
+        self._activity_state = ActivityState(type(self).__name__)
 
     def run(self) -> None:
         # restore last reading
@@ -848,6 +866,8 @@ class WindObserver(Thread):
         # start sub-threads
         self.anemometer.start()
         self.direction.start()
+
+        self._activity_state.all_fine()
 
         while not ExitEvent().is_set():
             # sleeps till full hour
@@ -877,7 +897,11 @@ class WindObserver(Thread):
                         self.parent.log.debug(f'All detected directions: {mc_all_dir_list}')
 
                 except Exception as e:
-                    self.parent.log.critical(f'ERROR during storing wind observation: {str(e)}', exc_info=e)
+                    _msg = f'ERROR during storing wind observation: {str(e)}'
+                    self._activity_state.warn(_msg)
+                    self.parent.log.critical(_msg, exc_info=e)
+
+        self._activity_state.mark_dead("Peacefully deceased")
 
         # wait for other threads to die
         self.anemometer.join()
@@ -907,6 +931,16 @@ class WindObserver(Thread):
                 wind_peak=speed_1hour.peak,
                 wind_variance=speed_1hour.variance))
 
+    def activities_states(self) -> list:
+        anemometer_state = self.anemometer.activity_state
+        if not self.anemometer.is_alive() and anemometer_state.state != ServiceActivityState.DEAD:
+            anemometer_state.mark_dead('Uncaught exception detected')
+        wdir_state = self.direction.activity_state
+        if not self.direction.is_alive() and wdir_state.state != ServiceActivityState.DEAD:
+            wdir_state.mark_dead('Uncaught exception detected')
+
+        return [self._activity_state, anemometer_state, wdir_state]
+
     class AnemometerObserver(Thread):
         ONE_IMPULSE_PER_SEC_IS_KMPH = 2.4
         STORE_TEMP_DATA_EACH_S = 600
@@ -923,8 +957,10 @@ class WindObserver(Thread):
             self._temp_file_1hour = os.path.join(temp_file_loc, f'anemometer_1hour.json')
             self._observations_1min.from_file(file_path=self._temp_file_1min, from_json=Impulse.from_json)
             self._observations_1hour.from_file(file_path=self._temp_file_1hour, from_json=Impulse.from_json)
+            self.activity_state = ActivityState(type(self).__name__)
 
         def run(self) -> None:
+            self.activity_state.all_fine('Nothing measured yet')
             while not ExitEvent().is_set():
                 ExitEvent().wait(timeout=self.STORE_TEMP_DATA_EACH_S)
                 # store temp data
@@ -932,6 +968,7 @@ class WindObserver(Thread):
                 self._observations_1hour.to_file(file_path=self._temp_file_1hour, to_json=Impulse.to_json)
 
             self.observed_pin.close()
+            self.activity_state.mark_dead('I did my job, farewell!')
 
         def _on_signal(self, duration: float, pin: int):
             _now = datetime.now()
@@ -942,6 +979,7 @@ class WindObserver(Thread):
             self.last_observation_at = _now
             self._observations_1min.append(_impulse)
             self._observations_1hour.append(_impulse)
+            self.activity_state.all_fine(f'Last minute wind speed is {self.get_observations_1min().average_speed} kmph')
 
         def get_observations_1min(self) -> WindSpeedObservation:
             return self._get_observations(self._observations_1min)
@@ -1008,7 +1046,7 @@ class WindObserver(Thread):
             self._sleep_time_between_measures_s = sleep_time_between_measures_s
             self._measurement_to_direction = {}
             for _p in range(101):
-                if 35 < _p <= 50:
+                if 30 <= _p <= 50:
                     self._measurement_to_direction[_p] = WindDirection.N
                 elif 50 < _p <= 54:
                     self._measurement_to_direction[_p] = WindDirection.NE
@@ -1027,13 +1065,16 @@ class WindObserver(Thread):
                 else:
                     self._measurement_to_direction[_p] = WindDirection.UNKNOWN
             self._unknown_readings = TimeWindowList(validity_time_s=60*60, get_time_mark_function=lambda x: x[1])
+            self.activity_state = ActivityState(type(self).__name__)
 
         def run(self) -> None:
+            self.activity_state.all_fine('Nothing measured yet')
             while not ExitEvent().is_set():
                 # read
                 _reading = self._read()
                 self._observations_1min.append(_reading)
                 self._observations_1hour.append(_reading)
+                self.activity_state.all_fine(f'Measured direction: {_reading.direction.name}')
 
                 ExitEvent().wait(timeout=self._sleep_time_between_measures_s)
 
@@ -1043,6 +1084,8 @@ class WindObserver(Thread):
                     self._observations_1min.to_file(file_path=self._temp_file_1min, to_json=WinDirReading.to_json)
                     self._observations_1hour.to_file(file_path=self._temp_file_1hour, to_json=WinDirReading.to_json)
                     self._temp_file_last_stored = datetime.now()
+
+            self.activity_state.mark_dead("Good bye, I'm done here")
 
         def _read(self) -> WinDirReading:
             _raw_reading = int(self._parent_service.adc_device.read_percentile(2) / 10)
@@ -1093,8 +1136,11 @@ class RainGaugeObserver(Thread):
         self.current_rain_hours = current_rain_hours
         self.current_rain_observations = TimeWindowList(
             validity_time_s=current_rain_hours * 60 * 60, get_time_mark_function=lambda x: x)
+        self.activity_state = ActivityState(type(self).__name__)
 
     def run(self) -> None:
+        self.activity_state.all_fine('Nothing measured yet')
+
         # restore the rain observations for last hours
         self.current_rain_observations.extend(
             self.parent.persistence.rain_observations_last_hours(
@@ -1111,8 +1157,11 @@ class RainGaugeObserver(Thread):
             db_bean = self.parent.store_rain_gauge_impulse()
             self.parent.log.info(f'Impulse has been stored to database: {str(db_bean)}')
             self.current_rain_observations.append(db_bean.period_start)
+            self.activity_state.all_fine(f'Last raindrop registered at {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
         except Exception as e:
-            self.parent.log.critical(f'ERROR during handling rain gauge signal: {str(e)}', exc_info=e)
+            _msg = f'ERROR during handling rain gauge signal: {str(e)}'
+            self.activity_state.warn(_msg)
+            self.parent.log.critical(_msg, exc_info=e)
 
     def get_current_observations(self):
         return RainGaugeObservationsReadingJson(
@@ -1185,42 +1234,53 @@ class MultisensorObserver(Thread):
         self.pressure_tendency_checker = TendencyChecker(
             observations_window=int(10 * 60 * 60 / (measure_polling_period_s + measure_duration_s)),
             threshold_perc=0.05)
+        self.activity_state = ActivityState(type(self).__name__)
 
     def run(self):
-        while not ExitEvent().is_set():
-            temperature_observations = array('i')
-            pressure_observations = array('i')
-            humidity_observations = array('i')
+        try:
+            while not ExitEvent().is_set():
+                temperature_observations = array('i')
+                pressure_observations = array('i')
+                humidity_observations = array('i')
 
-            # mark start time
-            time_mark = datetime.now()
+                # mark start time
+                time_mark = datetime.now()
 
-            try:
-                while not ExitEvent().is_set() \
-                        and (datetime.now() - time_mark).total_seconds() < self.measure_pooling_period:
-                    current = self.parent_service.multisensor_device.read(
-                        timeout_seconds=self.sleep_time_between_measures_s)
+                try:
+                    while not ExitEvent().is_set() \
+                            and (datetime.now() - time_mark).total_seconds() < self.measure_pooling_period:
+                        current = self.parent_service.multisensor_device.read(
+                            timeout_seconds=self.sleep_time_between_measures_s)
 
-                    temperature_observations.append(int(current.temperature() * 10))
-                    pressure_observations.append(current.pressure())
-                    humidity_observations.append(int(current.humidity()))
+                        temperature_observations.append(int(current.temperature() * 10))
+                        pressure_observations.append(current.pressure())
+                        humidity_observations.append(int(current.humidity()))
 
-                    ExitEvent().wait(self.sleep_time_between_measures_s)
+                        ExitEvent().wait(self.sleep_time_between_measures_s)
 
-                self.current_reading = MultisensorReading(
-                    temperature=float(stats.mode(temperature_observations, nan_policy='omit').mode[0] / 10),
-                    humidity=int(stats.mode(humidity_observations, nan_policy='omit').mode[0]),
-                    pressure=int(stats.mode(pressure_observations, nan_policy='omit').mode[0]),
-                    temperature_tendency=self.temperature_tendency_checker,
-                    humidity_tendency=self.humidity_tendency_checker,
-                    pressure_tendency=self.pressure_tendency_checker)
+                    self.current_reading = MultisensorReading(
+                        temperature=float(stats.mode(temperature_observations, nan_policy='omit').mode[0] / 10),
+                        humidity=int(stats.mode(humidity_observations, nan_policy='omit').mode[0]),
+                        pressure=int(stats.mode(pressure_observations, nan_policy='omit').mode[0]),
+                        temperature_tendency=self.temperature_tendency_checker,
+                        humidity_tendency=self.humidity_tendency_checker,
+                        pressure_tendency=self.pressure_tendency_checker)
 
-                self.parent_service.log.debug(f'Multisensor results: {str(self.current_reading)}')
+                    _msg = f'Multisensor results: {str(self.current_reading)}'
+                    self.activity_state.all_fine(_msg)
+                    self.parent_service.log.debug(_msg)
 
-            except MultisensorReadingException as e:
-                self.parent_service.log.critical(f'Multisenor malfunctioned. Details: {str(e)}')
+                except MultisensorReadingException as e:
+                    _msg = f'Multisenor malfunctioned. Details: {str(e)}'
+                    self.activity_state.warn(_msg)
+                    self.parent_service.log.critical(_msg)
 
-            ExitEvent().wait(self.measure_pooling_period)
+                ExitEvent().wait(self.measure_pooling_period)
+
+            self.activity_state.mark_dead("Peacefully deceased")
+
+        except Exception as e:
+            self.activity_state.mark_dead(f'Violently interrupted by {str(e)}')
 
     def get_temperature_reading(self) -> AbstractJsonBean:
         if not self.is_alive():
@@ -1289,39 +1349,52 @@ class RPiCoolDown(Thread):
 
         self.measure_temp_output_re_pattern = re.compile('temp=(\\d+\\.\\d*).*')
 
+        self.activity_state = ActivityState(type(self).__name__)
+
     def run(self):
-        while not ExitEvent().is_set():
-            exec_res = subprocess.run([self.COMMAND_VCGENCMD, self.COMMAND_MEASURETEMP], capture_output=True)
+        try:
+            while not ExitEvent().is_set():
+                exec_res = subprocess.run([self.COMMAND_VCGENCMD, self.COMMAND_MEASURETEMP], capture_output=True)
 
-            exec_stdout = exec_res.stdout.decode('utf-8')
+                exec_stdout = exec_res.stdout.decode('utf-8')
 
-            if exec_res.returncode == 0:
-                temp_matched = self.measure_temp_output_re_pattern.match(exec_stdout)
-                if temp_matched:
-                    temp = float(temp_matched.group(1))
+                if exec_res.returncode == 0:
+                    temp_matched = self.measure_temp_output_re_pattern.match(exec_stdout)
+                    if temp_matched:
+                        temp = float(temp_matched.group(1))
 
-                    if temp > self.on_temp and not self.fan.is_active and (
-                            not self.day_only
-                            or (self.day_only_hour_on <= datetime.now().hour < self.day_only_hour_off)):
-                        self.parent_service.log.info(f'{self.parent_service.get_hostname()} '
-                                                     f'reached temperature {temp}, '
-                                                     f'turning on cooling at {self.fan.pin}')
-                        self.fan.on()
-                    elif temp < self.off_temp and self.fan.is_active:
-                        self.parent_service.log.info(f'{self.parent_service.get_hostname()} '
-                                                     f'reached temperature {temp}, '
-                                                     f'stopping cooling at {self.fan.pin}')
-                        self.fan.off()
+                        if temp > self.on_temp and not self.fan.is_active and (
+                                not self.day_only
+                                or (self.day_only_hour_on <= datetime.now().hour < self.day_only_hour_off)):
+                            _msg = f'{self.parent_service.get_hostname()} reached temperature {temp}, ' \
+                                   f'turning on cooling at {self.fan.pin}'
+                            self.activity_state.all_fine(_msg)
+                            self.parent_service.log.info(_msg)
+                            self.fan.on()
+                        elif temp < self.off_temp and self.fan.is_active:
+                            _msg = f'{self.parent_service.get_hostname()} reached temperature {temp}, ' \
+                                   f'stopping cooling at {self.fan.pin}'
+                            self.activity_state.all_fine(_msg)
+                            self.parent_service.log.info(_msg)
+                            self.fan.off()
 
+                    else:
+                        _msg = f'Internal temperature cannot be properly parsed from {exec_stdout} ' \
+                               f'using pattern {self.measure_temp_output_re_pattern.pattern}'
+                        self.activity_state.warn(_msg)
+                        self.parent_service.log.error(_msg)
                 else:
-                    self.parent_service.log.error(f'Internal temperature cannot be properly parsed from {exec_stdout} '
-                                                  f'using pattern {self.measure_temp_output_re_pattern.pattern}')
-            else:
-                self.parent_service.log.error(f'Internal temperature measure failed. Stdout: [{exec_stdout}]. '
-                                              f'Stderr: [{exec_res.stderr.decode("utf-8")}]')
+                    _msg = f'Internal temperature measure failed. Stdout: [{exec_stdout}]. ' \
+                           f'Stderr: [{exec_res.stderr.decode("utf-8")}]'
+                    self.activity_state.warn(_msg)
+                    self.parent_service.log.error(_msg)
 
-            ExitEvent().wait(self.probing_period)
-        self.fan.close()
+                ExitEvent().wait(self.probing_period)
+            self.fan.close()
+            self.activity_state.mark_dead("What do you want? I'm dead now!")
+
+        except Exception as e:
+            self.activity_state.mark_dead(f'Violently interrupted by {str(e)}')
 
 
 if __name__ == '__main__':
