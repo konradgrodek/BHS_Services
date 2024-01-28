@@ -190,24 +190,29 @@ class WeatherStationService(Service):
         mark = datetime.now()
 
         # check if threads are running
-        if not self.luminosity_observer.is_alive():
-            self.luminosity_observer.start()
+        try:
+            if not self.luminosity_observer.is_alive():
+                self.luminosity_observer.start()
 
-        if not self.multisensor_observer.is_alive():
-            self.multisensor_observer.start()
+            if not self.multisensor_observer.is_alive():
+                self.multisensor_observer.start()
 
-        if self.cooling_config != CoolingConfig.Inactive:
-            if not self.fan_control.is_alive():
-                self.fan_control.start()
+            if self.cooling_config != CoolingConfig.Inactive:
+                if not self.fan_control.is_alive():
+                    self.fan_control.start()
 
-        if not self.wind_observer.is_alive():
-            self.wind_observer.start()
+            if not self.wind_observer.is_alive():
+                self.wind_observer.start()
 
-        if not self.rain_gauge_observer.is_alive():
-            self.rain_gauge_observer.start()
+            if not self.rain_gauge_observer.is_alive():
+                self.rain_gauge_observer.start()
 
-        # air quality
-        self.measure_air_quality()
+            # air quality
+            self.measure_air_quality()
+
+        except Exception as e:
+            self.main_activity_state.warn(f'{str(e)}')
+            self.log.critical(f'Critical error in main loop of weather station', exc_info=e)
 
         return self.polling_period - (datetime.now() - mark).total_seconds()
 
@@ -1141,14 +1146,19 @@ class RainGaugeObserver(Thread):
     def run(self) -> None:
         self.activity_state.all_fine('Nothing measured yet')
 
-        # restore the rain observations for last hours
-        self.current_rain_observations.extend(
-            self.parent.persistence.rain_observations_last_hours(
-                the_sensor=self.parent.get_rain_gauge_sensor(),
-                the_date=datetime.now(),
-                hours_in_the_past=self.current_rain_hours))
+        try:
+            # restore the rain observations for last hours
+            self.current_rain_observations.extend(
+                self.parent.persistence.impulse_observations_last_hours(
+                    the_sensor=self.parent.get_rain_gauge_sensor(),
+                    the_date=datetime.now(),
+                    hours_in_the_past=self.current_rain_hours))
 
-        ExitEvent().wait()
+            ExitEvent().wait()
+        except Exception as e:
+            self.activity_state.mark_dead(str(e))
+            self.parent.log.critical('Fatal error occurred in rain-gauge-observer', exc_info=e)
+
         self.observed_pin.close()
 
     def _on_signal(self, duration: float, pin: int):
@@ -1377,6 +1387,9 @@ class RPiCoolDown(Thread):
                             self.activity_state.all_fine(_msg)
                             self.parent_service.log.info(_msg)
                             self.fan.off()
+                        else:
+                            self.activity_state.all_fine(f'{self.parent_service.get_hostname()} temperature: {temp}, '
+                                                         f'the cooling is {"ON" if self.fan.is_active else "OFF"}')
 
                     else:
                         _msg = f'Internal temperature cannot be properly parsed from {exec_stdout} ' \
