@@ -22,7 +22,7 @@ class MultisensorResult:
 
 class MultisensorReadingException(Exception):
     def __init__(self, msg):
-        Exception.__init__(msg)
+        Exception.__init__(self, msg)
 
 
 class MultisensorBME280:

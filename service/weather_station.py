@@ -1283,7 +1283,7 @@ class MultisensorObserver(Thread):
                 except MultisensorReadingException as e:
                     _msg = f'Multisenor malfunctioned. Details: {str(e)}'
                     self.activity_state.warn(_msg)
-                    self.parent_service.log.critical(_msg)
+                    self.parent_service.log.critical(_msg, exc_info=sys.exc_info())
 
                 ExitEvent().wait(self.measure_pooling_period)
 
@@ -1291,6 +1291,7 @@ class MultisensorObserver(Thread):
 
         except Exception as e:
             self.activity_state.mark_dead(f'Violently interrupted by {str(e)}')
+            self.parent_service.log.critical(f"Fatal error occurred in multi-sensor processing", exc_info=sys.exc_info())
 
     def get_temperature_reading(self) -> AbstractJsonBean:
         if not self.is_alive():
