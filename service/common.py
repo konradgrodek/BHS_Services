@@ -14,7 +14,7 @@ from werkzeug.serving import make_server
 from threading import Thread
 
 from core.bean import *
-from core.util import ExitEvent
+from core.util import ExitEvent, HostInfoThread
 from persistence.schema import *
 
 
@@ -27,6 +27,7 @@ class Configuration:
     SECTION_DB = 'DATABASE'
     SECTION_LOG = 'LOG'
     SECTION_REST = 'REST'
+    SECTION_HOST_STATUS = 'HOST-STATUS'
 
     PARAM_DB = 'db'
     PARAM_USER = 'user'
@@ -38,6 +39,8 @@ class Configuration:
     PARAM_LOGTOSTDOUT = 'log-to-stdout'
 
     PARAM_REST_PORT = 'port'
+
+    PARAM_HOST_STATUS_POLLING = 'polling-period-s'
 
     def __init__(self, name: str):
         """Initializes the configuration. Parameter `name` is mandatory as it is used to find the configuration file"""
@@ -80,6 +83,22 @@ class Configuration:
                     minute=int(splt[1]) if len(splt) > 1 else 0,
                     second=int(splt[2]) if len(splt) > 2 else 0)
 
+    def getBooleanConfigValue(self, section: str, parameter: str, default: bool = False) -> bool:
+        """
+        Returns boolean parameter from config file.
+        If the entry is missing, the method returns False unless the default=True is provided.
+        The values `true`, `1`, `yes`, `ok` are treated as True; all other values will be interpreted as False.
+        None will only be returned if the entry is missing and default is explicitly set to None (don't do that)
+        :param section: the config section
+        :param parameter: the config parameter
+        :param default: the default value to be taken if entry is missing; False if not provided
+        :return: True or False or None
+        """
+        val = self.getConfigValue(section, parameter, default)
+        if type(val) == str:
+            return val.lower() in ("true", "1", "yes", "ok")
+        return False if default is not None else None
+
     def getLogFile(self) -> str:
         return self.getConfigValue(self.SECTION_LOG, self.PARAM_LOGFILE)
 
@@ -106,6 +125,9 @@ class Configuration:
 
     def getRestPort(self) -> int:
         return self.getIntConfigValue(self.SECTION_REST, self.PARAM_REST_PORT, -1)
+
+    def getHostStatusPollingPeriod(self) -> int:
+        return self.getIntConfigValue(self.SECTION_HOST_STATUS, self.PARAM_HOST_STATUS_POLLING, -1)
 
 
 class LocalConfiguration(Configuration):
@@ -217,8 +239,15 @@ class Service:
             self.rest_server = RestServer(port, self.rest_app)
             self.rest_app.add_url_rule('/hc', 'service_health_check',
                                        self.get_rest_response_health_check)
+            host_status_pp = self.configuration.getHostStatusPollingPeriod()
+            if host_status_pp > 0 and port > 0:
+                self.host_status_thread = HostInfoThread(host_status_pp)
+                self.host_status_thread.start()
+                self.rest_app.add_url_rule('/hs', 'host_status',
+                                           self.get_rest_response_host_status)
         else:
             self.rest_server = None
+            self.host_status_thread = None
 
     def run(self):
         self.log.info(f'Starting service {self.provideName()}')
@@ -261,6 +290,8 @@ class Service:
         self.persistence.close()
         if self.rest_server:
             self.rest_server.shutdown()
+        if self.host_status_thread:
+            self.host_status_thread.join()
         self.cleanup()
 
     # interface
@@ -300,6 +331,12 @@ class Service:
                 name=self.provideName(),
                 activities_state=[self.main_activity_state] + self.service_activities_states()
             )
+        )
+
+    # host status
+    def get_rest_response_host_status(self):
+        return self.jsonify(
+            self.host_status_thread.host_status if self.host_status_thread is not None else NotAvailableJsonBean()
         )
 
     # useful methods
