@@ -5,6 +5,7 @@
 import serial
 
 from collections import namedtuple
+from functools import reduce
 
 Command = namedtuple('Command', ['code', 'name', 'kind', 'timeout_ms', 'min_version'])
 CMD_START = Command(code=0x00, name='Start Measurement', kind='Execute', timeout_ms=20, min_version=(1, 0))
@@ -41,5 +42,42 @@ class MOSIFrame:
     ADR = 0x00
     STOP = START
 
-    def __init__(self, command: int):
-        pass
+    _BYTES_STAFFING = {
+        0x7E: [0x7D, 0x5E],
+        0x7D: [0x7D, 0x5D],
+        0x11: [0x7D, 0x31],
+        0x13: [0x7D, 0x33],
+    }
+
+    def __init__(self, command: Command, data: bytes):
+        if len(data) > 255:
+            raise ValueError(f'The data provided with command `{command.name}` exceeds maximum length of 255 bytes')
+
+        self.command = command
+        self.original_data = data
+
+    def _byte_stuffing(self, _byte: int) -> list:
+        if _byte in self._BYTES_STAFFING:
+            return self._BYTES_STAFFING[_byte]
+        return [_byte]
+
+    def get_command(self) -> int:
+        return self.command.code
+
+    def get_data_len(self) -> int:
+        return len(self.original_data)
+
+    def get_checksum(self) -> int:
+        return 0xFF - (sum([MOSIFrame.ADR, self.get_command(), self.get_data_len()]+list(self.original_data)) % 0xFF)
+
+    def get_frame(self) -> bytes:
+        return bytes(
+            [MOSIFrame.START,
+             MOSIFrame.ADR,
+             self.get_command()
+             ] + self._byte_stuffing(self.get_data_len()) +
+            reduce(lambda x, y: x + y, [self._byte_stuffing(b) for b in self.original_data]) +
+            self._byte_stuffing(self.get_checksum())
+        )
+
+        # f"{1000%256:X}"
