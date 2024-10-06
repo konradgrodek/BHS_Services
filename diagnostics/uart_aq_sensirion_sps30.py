@@ -5,7 +5,10 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.style import Style
 from getch import getch
-from datetime import datetime
+
+import sys
+sys.path.append('..')
+
 from device.dev_serial_sps30 import *
 
 
@@ -15,42 +18,42 @@ from device.dev_serial_sps30 import *
 #         self.command_exe = command_exe
 
 
-
-
-ACTIONS = {
-    "1": ("Wake up", lambda: "Wake up not implemented"),
-    "2": ("Device information", lambda: "Device info not implemented"),
-    "3": ("Device status", lambda: "Device status not implemented"),
-    "4": ("Read version", lambda: "Read version not implemented"),
-    "5": ("Device register status", lambda: "Not implemented"),
-    "6": ("Start measurement", lambda: "Not implemented"),
-    "7": ("Read measurement", lambda: "Not implemented"),
-    "8": ("Stop measurement", lambda: "Not implemented"),
-    "9": ("Sleep", lambda: "Not implemented"),
-    "R": ("Reset", lambda: "Not implemented"),
-    "0": ("Exit", exit),
-}
-
-
-def menu() -> Table:
+def menu(actions_menu: dict) -> Table:
     _menu = Table()
     _menu.add_column("Key", style="red")
     _menu.add_column("Command", style="magenta")
-    for _key in ACTIONS:
-        _menu.add_row(_key, ACTIONS[_key][0])
+    for _key in actions_menu:
+        _menu.add_row(_key, actions_menu[_key][0])
     return _menu
 
 
-LOG = [f"{datetime.now().strftime('%H:%M:%S')} Ready!"]
-
-
-def info() -> Table:
+def info(history: list, current: list) -> Table:
     _tab = Table(show_header=False, show_edge=False)
 
-    for _log in reversed(LOG):
-        _tab.add_row(Text(_log, style=Style(color="orange4")))
+    for _log_entry in reversed(current):
+        _tab.add_row(Text(_log_entry, style=Style(color="orange4")))
+    for _log_entry in reversed(history):
+        _tab.add_row(Text(_log_entry))
 
     return _tab
+
+
+def frames(frames_list: list) -> Table:
+    _tab = Table(show_header=False, show_edge=False)
+
+    for frame in frames_list:
+        _tab.add_row(Text(repr(frame)))
+
+    return _tab
+
+
+def update_layout(actions_menu: dict, history: list, current: list, requests: list, responses: list) -> Layout:
+    layout["menu"].update(Panel(menu(actions_menu), title="Menu"))
+    layout["info"].update(Panel(info(history, current), title="Log"))
+    layout["request"].update(Panel(frames(requests), title="Requests"))
+    layout["response"].update(Panel(frames(responses), title="Responses"))
+
+    return layout
 
 
 if __name__ == "__main__":
@@ -71,18 +74,61 @@ if __name__ == "__main__":
         Layout(name="response")
     )
 
-    def update_layout() -> Layout:
-        layout["menu"].update(Panel(menu(), title="Menu"))
-        layout["info"].update(Panel(info(), title="Log"))
-        return layout
-
     console.print(Panel(layout, title="Sensirion SPS-30 sensor diagnostics"))
+    try:
+        sensor = ParticulateMatterSensor()
+    except SHDLCError:
+        console.print_exception()
+        exit(1)
+
+    the_log = [f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} Port open for {str(sensor.device)}"]
+
+    requests_history = list()
+    responses_history = list()
+
+    def collect_response(response: MISOFrame):
+        responses_history.append(response)
+
+    actions = {
+        "1": ("Wake up", lambda: sensor.wake_up(collect_response)),
+        "2": ("Device information", lambda: "Device info not implemented"),
+        "3": ("Device status", lambda: "Device status not implemented"),
+        "4": ("Read version", lambda: "Read version not implemented"),
+        "5": ("Device register status", lambda: "Not implemented"),
+        "6": ("Start measurement", lambda: sensor.start_measurement(collect_response)),
+        "7": ("Read measurement", lambda: "Not implemented"),
+        "8": ("Stop measurement", lambda: "Not implemented"),
+        "9": ("Sleep", lambda: "Not implemented"),
+        "R": ("Reset", lambda: "Not implemented"),
+        "0": ("Exit", lambda: 0),
+    }
 
     while True:
-        console.print(update_layout())
+        console.print(update_layout(actions_menu=actions, history=the_log, current=[],
+                                    requests=requests_history, responses=responses_history))
         key = getch()
-        if key in ACTIONS:
-            LOG.append(f"{datetime.now().strftime('%H:%M:%S')} {ACTIONS[key][1]()}")
+        if key in actions:
+            action = actions[key][1]()
+            if isinstance(action, int):
+                exit(action)
+            elif isinstance(action, str):
+                the_log.append(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} {action}")
+            else:  # CommandExecution
+                requests_history.append(action.get_mosi())
+                while True:
+                    console.print(
+                        update_layout(actions_menu=actions, history=the_log, current=action.get_trace().collect_log(),
+                                      requests=requests_history, responses=responses_history))
+                    action.join(timeout=0.2)
+                    if not action.is_alive():
+                        try:
+                            the_log.extend(action.get_trace().collect_log())
+                            action.raise_error()
+                        except SHDLCError as _x:
+                            the_log.append(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} {str(_x)}")
+                        break
+
+
 
 
 

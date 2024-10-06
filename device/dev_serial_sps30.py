@@ -7,6 +7,8 @@ import serial
 from collections import namedtuple
 from functools import reduce
 from threading import Thread
+from datetime import datetime
+from time import sleep
 
 Command = namedtuple('Command', ['code', 'name', 'kind', 'timeout_ms', 'min_version'])
 CMD_START = Command(code=0x00, name='Start Measurement', kind='Execute', timeout_ms=20, min_version=(1, 0))
@@ -58,6 +60,12 @@ class DeviceError(SHDLCError):
         SHDLCError.__init__(self, f'Device error was reported. Query for Device Status Register for details')
 
 
+class DeviceCommunicationError(SHDLCError):
+
+    def __init__(self, msg):
+        SHDLCError.__init__(self, f'There was a problem with communicating with the device. {msg}')
+
+
 class ResponseError(SHDLCError):
 
     def __init__(self, error_code: int):
@@ -71,6 +79,10 @@ class ConfigurationError(SHDLCError):
 
     def __init__(self, msg: str):
         SHDLCError.__init__(self, f'The used parameter is incorrect. {msg}')
+
+
+def str_bytes(content: bytes):
+    return "|".join([f"0x{_b:X}" for _b in content])
 
 
 class MOSIFrame:
@@ -113,12 +125,13 @@ class MOSIFrame:
              FRAME_SLAVE_ADR,
              self.get_command()
              ] + self._byte_stuffing(self.get_data_len()) +
-            reduce(lambda x, y: x + y, [self._byte_stuffing(b) for b in self.original_data]) +
+            reduce(lambda x, y: x + y, [self._byte_stuffing(b) for b in self.original_data], []) +
             self._byte_stuffing(self.get_checksum()) +
             [FRAME_STOP]
         )
 
-        # f"{1000%256:X}"
+    def __repr__(self):
+        return str_bytes(self.get_frame())
 
 
 class MISOFrame:
@@ -132,17 +145,15 @@ class MISOFrame:
         for ori_byte in MOSIFrame.BYTES_STUFFING
     }
 
-    @staticmethod
-    def _str_bytes(_bytes: bytes) -> str:
-        return "|".join([f"0x{_b:X}" for _b in _bytes])
-
     def __init__(self, bytes_received: bytes):
         self.raw_frame_bytes = bytes_received
 
+        if self.raw_frame_bytes is None or len(self.raw_frame_bytes) == 0:
+            raise ResponseFrameError(f'The sensor has not sent any data')
         if len(self.raw_frame_bytes) < 7:
             raise ResponseFrameError(f'The length of received data from the sensor '
                                      f'is unexpectedly short ({len(self.raw_frame_bytes)} bytes), '
-                                     f'full frame: {MISOFrame._str_bytes(self.raw_frame_bytes)}')
+                                     f'full frame: {str_bytes(self.raw_frame_bytes)}')
         if self.raw_frame_bytes[0] != FRAME_START:
             raise ResponseFrameError(f'The first byte is not a start-byte, expected 0x{FRAME_START:X}, '
                                      f'actual 0x{self.raw_frame_bytes[0]:X}')
@@ -161,8 +172,8 @@ class MISOFrame:
                     self.frame_bytes.append(self.BYTES_DISEMBOWELLING[self.raw_frame_bytes[_i+1]])
                 else:
                     raise ResponseFrameError(f"Incorrect byte-stuffing found: "
-                                             f"{MISOFrame._str_bytes(self.raw_frame_bytes[_i:_i+2])}, "
-                                             f"full frame: {MISOFrame._str_bytes(self.raw_frame_bytes)}")
+                                             f"{str_bytes(self.raw_frame_bytes[_i:_i+2])}, "
+                                             f"full frame: {str_bytes(self.raw_frame_bytes)}")
                 _i += 2
             else:
                 self.frame_bytes.append(self.raw_frame_bytes[_i])
@@ -184,11 +195,11 @@ class MISOFrame:
         _data_length = self.frame_bytes[4]
         if not 0 >= _data_length >= 255:
             raise ResponseFrameError(f"The length of data indicated {_data_length} is out of acceptable boundaries. "
-                                     f"Full frame: {MISOFrame._str_bytes(self.raw_frame_bytes)}")
+                                     f"Full frame: {str_bytes(self.raw_frame_bytes)}")
         if len(self.frame_bytes) - _data_length != 7:
             raise ResponseFrameError(f"The length of data indicated {_data_length} is incorrect, "
                                      f"expected {len(self.frame_bytes)-7}. "
-                                     f"Full frame: {MISOFrame._str_bytes(self.raw_frame_bytes)}")
+                                     f"Full frame: {str_bytes(self.raw_frame_bytes)}")
 
         self.data = self.frame_bytes[5:5+_data_length]
 
@@ -197,23 +208,111 @@ class MISOFrame:
         if _chk != _act_chk:
             raise ResponseFrameError(f"Wrong checksum detected. "
                                      f"Expected 0x{_act_chk:X}, received: 0x{_chk:X}. "
-                                     f"Full frame: {MISOFrame._str_bytes(self.raw_frame_bytes)}")
+                                     f"Full frame: {str_bytes(self.raw_frame_bytes)}")
+
+    def __repr__(self):
+        return str_bytes(self.raw_frame_bytes)
 
 
 class CommandExecution(Thread):
-    MAX_EXEC_TIME_MS = 1000
+
+    class CommandExecutionTrace:
+
+        def __init__(self, cmd: Command):
+            self._command = cmd
+            self.tm_start = None
+            self.tm_command_sent = None
+            self.tm_reading_started = None
+            self.tm_end = None
+
+        def start(self):
+            self.tm_start = datetime.now()
+
+        def command_sent(self):
+            self.tm_command_sent = datetime.now()
+
+        def reading_started(self):
+            self.tm_reading_started = datetime.now()
+
+        def end(self):
+            self.tm_end = datetime.now()
+
+        @staticmethod
+        def _log(tm: datetime, msg: str, include_timestamps: bool) -> str:
+            return (f'{tm.strftime("%H:%M:%S.%f")[:-3]} ' if include_timestamps else '') + msg
+
+        def write_duration_ms(self):
+            if self.tm_command_sent is None:
+                return None
+            return round((self.tm_command_sent - self.tm_start).total_seconds() / 1000)
+
+        def read_duration_ms(self):
+            if self.tm_end is None:
+                return None
+            return round((self.tm_end - self.tm_reading_started).total_seconds() / 1000)
+
+        def total_duration_ms(self):
+            if self.tm_end is None:
+                return None
+            return round((self.tm_end - self.tm_start).total_seconds() / 1000)
+
+        def collect_log(self, include_timestamps=True) -> list:
+            _log = list([self._log(
+                self.tm_start,
+                f'Executing command 0x{self._command.code:X} {self._command.name}',
+                include_timestamps
+            )])
+            if self.tm_command_sent is not None:
+                _log.append(self._log(
+                    self.tm_command_sent,
+                    f'Command sent to device, write took {self.write_duration_ms()} ms',
+                    include_timestamps
+                ))
+            if self.tm_reading_started is not None:
+                _log.append(self._log(
+                    self.tm_reading_started,
+                    f'Reading started',
+                    include_timestamps
+                ))
+            if self.tm_end is not None:
+                _log.append(self._log(
+                    self.tm_end,
+                    f'Reading concluded in {self.read_duration_ms()} ms. '
+                    f'Total execution duration: {self.total_duration_ms()} ms',
+                    include_timestamps
+                ))
+            return _log
 
     def __init__(self, device: serial.Serial, command: Command, data: bytes):
         Thread.__init__(self)
         self._device = device
         self._command = command
         self._mosi = MOSIFrame(command, data)
-        self._log = []
-        self._miso: MISOFrame = None
-        self._error: SHDLCError = None
+        self._miso = None
+        self._error = None
+        self._callback_fnc = None
+        self._trace = self.CommandExecutionTrace(command)
 
     def run(self) -> None:
-        pass
+        self._trace.start()
+        try:
+            self._device.write(self._mosi.get_frame())
+        except serial.SerialTimeoutException as _x:
+            self._error = DeviceCommunicationError(
+                f'Timeout occurred during attempt to send command <{self._command.name}>. '
+                f'Root cause: {str(_x)}'
+            )
+            return
+        self._trace.command_sent()
+        sleep(self._command.timeout_ms / 1000)
+        self._trace.reading_started()
+        response_data = self._device.read_all()
+        try:
+            self._miso = MISOFrame(response_data)
+        except SHDLCError as _x:
+            self._error = _x
+
+        self._trace.end()
 
     def get_mosi(self) -> MOSIFrame:
         return self._mosi
@@ -234,8 +333,14 @@ class CommandExecution(Thread):
         if self._error is not None:
             raise self._error
 
-    def get_log(self) -> list:
-        return self._log
+    def get_trace(self) -> CommandExecutionTrace:
+        return self._trace
+
+    def register_callback(self, callback_fnc):
+        if self._callback_fnc is None:
+            self._callback_fnc = callback_fnc
+        else:
+            raise ValueError('Internal error: callback function is already registered')
 
 
 class StartMeasurement(CommandExecution):
@@ -376,4 +481,55 @@ class DeviceReset(CommandExecution):
 
     def __init__(self, device: serial.Serial):
         CommandExecution.__init__(self, device, CMD_RESET, bytes())
+
+
+class ParticulateMatterSensor:
+    READ_TIMEOUT_MS = 1000
+    WRITE_TIMEOUT_MS = 1000
+
+    def __init__(self):
+        try:
+            self.device = serial.Serial(
+                port="/dev/ttyAMA0",
+                baudrate=115200,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                bytesize=serial.EIGHTBITS,  # number of data bits
+                exclusive=True,  # port cannot be opened in exclusive access mode if it is already open in this mode
+                timeout=ParticulateMatterSensor.READ_TIMEOUT_MS / 1000,
+                write_timeout=ParticulateMatterSensor.WRITE_TIMEOUT_MS / 1000
+            )
+        except serial.SerialException as _x:
+            raise DeviceCommunicationError(f"The UART port cannot be initialized. Root cause: {str(_x)}")
+        except ValueError as _x:
+            raise ConfigurationError(f"Parameter out of range. Root cause: {str(_x)}")
+
+    def _active_device(self) -> serial.Serial:
+        if not self.device.is_open:
+            self.device.open()
+        return self.device
+
+    def _handle_action(self, action: CommandExecution, callback_fnc) -> CommandExecution:
+        if callback_fnc is not None:
+            action.register_callback(callback_fnc)
+
+        action.start()
+
+        if callback_fnc is None:
+            action.join()
+            action.raise_error()  # this will detect error of communication and raise appropriate exception
+
+        return action
+
+    def wake_up(self, callback_fnc=None) -> CommandExecution:
+        return self._handle_action(
+            action=WakeUp(device=self._active_device()),
+            callback_fnc=callback_fnc
+        )
+
+    def start_measurement(self, callback_fnc=None) -> CommandExecution:
+        return self._handle_action(
+            action=StartMeasurement(device=self._active_device()),
+            callback_fnc=callback_fnc
+        )
 
