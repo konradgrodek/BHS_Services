@@ -74,7 +74,7 @@ if __name__ == "__main__":
         Layout(name="response")
     )
 
-    console.print(Panel(layout, title="Sensirion SPS-30 sensor diagnostics"))
+    # console.print(Panel(layout, title="Sensirion SPS-30 sensor diagnostics"))
     try:
         sensor = ParticulateMatterSensor()
     except SHDLCError:
@@ -91,21 +91,27 @@ if __name__ == "__main__":
 
     actions = {
         "1": ("Wake up", lambda: sensor.wake_up(collect_response)),
-        "2": ("Device information", lambda: "Device info not implemented"),
-        "3": ("Device status", lambda: "Device status not implemented"),
-        "4": ("Read version", lambda: "Read version not implemented"),
-        "5": ("Device register status", lambda: "Not implemented"),
+        "2": ("Device information", lambda: sensor.get_serial_number(collect_response)),
+        "3": ("Device status", lambda: sensor.get_status(collect_response)),
+        "4": ("Read version", lambda: sensor.get_version(collect_response)),
+        "5": ("Device register status", lambda: sensor.get_status(collect_response)),
         "6": ("Start measurement", lambda: sensor.start_measurement(collect_response)),
-        "7": ("Read measurement", lambda: "Not implemented"),
-        "8": ("Stop measurement", lambda: "Not implemented"),
-        "9": ("Sleep", lambda: "Not implemented"),
-        "R": ("Reset", lambda: "Not implemented"),
+        "7": ("Read measurement", lambda: sensor.read_measured_values(collect_response)),
+        "8": ("Stop measurement", lambda: sensor.stop_measurement(collect_response)),
+        "9": ("Sleep", lambda: sensor.sleep(collect_response)),
+        "R": ("Reset", lambda: sensor.reset(collect_response)),
         "0": ("Exit", lambda: 0),
     }
 
     while True:
-        console.print(update_layout(actions_menu=actions, history=the_log, current=[],
-                                    requests=requests_history, responses=responses_history))
+        console.print(Panel(
+            update_layout(
+                actions_menu=actions,
+                history=the_log,
+                current=[],
+                requests=requests_history,
+                responses=responses_history),
+            title="Sensirion SPS-30 sensor diagnostics"))
         key = getch()
         if key in actions:
             action = actions[key][1]()
@@ -116,9 +122,15 @@ if __name__ == "__main__":
             else:  # CommandExecution
                 requests_history.append(action.get_mosi())
                 while True:
-                    console.print(
-                        update_layout(actions_menu=actions, history=the_log, current=action.get_trace().collect_log(),
-                                      requests=requests_history, responses=responses_history))
+                    console.print(Panel(
+                        update_layout(
+                            actions_menu=actions,
+                            history=the_log,
+                            current=action.get_trace().collect_log(),
+                            requests=requests_history,
+                            responses=responses_history),
+                        title="Sensirion SPS-30 sensor diagnostics")
+                    )
                     action.join(timeout=0.2)
                     if not action.is_alive():
                         try:

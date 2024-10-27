@@ -50,8 +50,9 @@ class SHDLCError(Exception):
 
 class ResponseFrameError(SHDLCError):
 
-    def __init__(self, msg: str):
+    def __init__(self, msg: str, data=None):
         SHDLCError.__init__(self, f'The received frame has incorrect structure or content. {msg}')
+        self.original_bytes_received: bytes = data
 
 
 class DeviceError(SHDLCError):
@@ -91,11 +92,12 @@ class MOSIFrame:
     It represents the command sent from master (RPi) to the SPS30 sensor.
     """
 
+    BYTES_DISEMBOWELLING_START = 0x7D
     BYTES_STUFFING = {
-        0x7E: [0x7D, 0x5E],
-        0x7D: [0x7D, 0x5D],
-        0x11: [0x7D, 0x31],
-        0x13: [0x7D, 0x33],
+        0x7E: [BYTES_DISEMBOWELLING_START, 0x5E],
+        0x7D: [BYTES_DISEMBOWELLING_START, 0x5D],
+        0x11: [BYTES_DISEMBOWELLING_START, 0x31],
+        0x13: [BYTES_DISEMBOWELLING_START, 0x33],
     }
 
     def __init__(self, command: Command, data: bytes):
@@ -117,7 +119,7 @@ class MOSIFrame:
         return len(self.original_data)
 
     def get_checksum(self) -> int:
-        return 0xFF - (sum([FRAME_SLAVE_ADR, self.get_command(), self.get_data_len()]+list(self.original_data)) % 0xFF)
+        return 0xFF - (sum([FRAME_SLAVE_ADR, self.get_command(), self.get_data_len()]+list(self.original_data)) % 0x100)
 
     def get_frame(self) -> bytes:
         return bytes(
@@ -153,36 +155,37 @@ class MISOFrame:
         if len(self.raw_frame_bytes) < 7:
             raise ResponseFrameError(f'The length of received data from the sensor '
                                      f'is unexpectedly short ({len(self.raw_frame_bytes)} bytes), '
-                                     f'full frame: {str_bytes(self.raw_frame_bytes)}')
+                                     f'full frame: {str_bytes(self.raw_frame_bytes)}', self.raw_frame_bytes)
         if self.raw_frame_bytes[0] != FRAME_START:
             raise ResponseFrameError(f'The first byte is not a start-byte, expected 0x{FRAME_START:X}, '
-                                     f'actual 0x{self.raw_frame_bytes[0]:X}')
+                                     f'actual 0x{self.raw_frame_bytes[0]:X}', self.raw_frame_bytes)
         if self.raw_frame_bytes[1] != FRAME_SLAVE_ADR:
             raise ResponseFrameError(f'The second byte is not a valid slave-address, expected 0x{FRAME_SLAVE_ADR:X}, '
-                                     f'actual 0x{self.raw_frame_bytes[1]:X}')
+                                     f'actual 0x{self.raw_frame_bytes[1]:X}', self.raw_frame_bytes)
         if self.raw_frame_bytes[-1] != FRAME_STOP:
             raise ResponseFrameError(f'The last byte is not a stop-byte, expected 0x{FRAME_STOP:X}, '
-                                     f'actual 0x{self.raw_frame_bytes[-1]:X}')
+                                     f'actual 0x{self.raw_frame_bytes[-1]:X}', self.raw_frame_bytes)
 
         self.frame_bytes = [self.raw_frame_bytes[0]]
         _i = 1
         while _i < len(self.raw_frame_bytes) - 1:
-            if self.raw_frame_bytes[_i] == FRAME_START:
+            if self.raw_frame_bytes[_i] == MOSIFrame.BYTES_DISEMBOWELLING_START:
                 if self.raw_frame_bytes[_i+1] in self.BYTES_DISEMBOWELLING:
                     self.frame_bytes.append(self.BYTES_DISEMBOWELLING[self.raw_frame_bytes[_i+1]])
                 else:
                     raise ResponseFrameError(f"Incorrect byte-stuffing found: "
                                              f"{str_bytes(self.raw_frame_bytes[_i:_i+2])}, "
-                                             f"full frame: {str_bytes(self.raw_frame_bytes)}")
+                                             f"full frame: {str_bytes(self.raw_frame_bytes)}", self.raw_frame_bytes)
                 _i += 2
             else:
                 self.frame_bytes.append(self.raw_frame_bytes[_i])
                 _i += 1
-        self.frame_bytes = [self.raw_frame_bytes[_i]]
+        self.frame_bytes.append(self.raw_frame_bytes[_i])
 
         self.command = {cmd.code: cmd for cmd in COMMANDS}.get(self.frame_bytes[2])
         if self.command is None:
-            raise ResponseFrameError(f'The second byte is not a valid command: 0x{self.frame_bytes[2]:X}')
+            raise ResponseFrameError(f'The second byte is not a valid command: 0x{self.frame_bytes[2]:X}. '
+                                     f'Full frame: {str_bytes(self.raw_frame_bytes)}', self.raw_frame_bytes)
 
         _state = self.frame_bytes[3]
         # The first bit (b7) indicates that at least one of the error flags is set in the Device Status Register
@@ -193,22 +196,22 @@ class MISOFrame:
             raise ResponseError(_state)
 
         _data_length = self.frame_bytes[4]
-        if not 0 >= _data_length >= 255:
+        if not (0 <= _data_length <= 255):
             raise ResponseFrameError(f"The length of data indicated {_data_length} is out of acceptable boundaries. "
-                                     f"Full frame: {str_bytes(self.raw_frame_bytes)}")
+                                     f"Full frame: {str_bytes(self.raw_frame_bytes)}", self.raw_frame_bytes)
         if len(self.frame_bytes) - _data_length != 7:
             raise ResponseFrameError(f"The length of data indicated {_data_length} is incorrect, "
                                      f"expected {len(self.frame_bytes)-7}. "
-                                     f"Full frame: {str_bytes(self.raw_frame_bytes)}")
+                                     f"Full frame: {str_bytes(self.raw_frame_bytes)}", self.raw_frame_bytes)
 
         self.data = self.frame_bytes[5:5+_data_length]
 
         _chk = self.frame_bytes[-2]
-        _act_chk = 0xFF - (sum(self.frame_bytes[1:-2]) % 0xFF)
+        _act_chk = 0xFF - (sum(self.frame_bytes[1:-2]) % 0x100)
         if _chk != _act_chk:
             raise ResponseFrameError(f"Wrong checksum detected. "
                                      f"Expected 0x{_act_chk:X}, received: 0x{_chk:X}. "
-                                     f"Full frame: {str_bytes(self.raw_frame_bytes)}")
+                                     f"Full frame: {str_bytes(self.raw_frame_bytes)}", self.raw_frame_bytes)
 
     def __repr__(self):
         return str_bytes(self.raw_frame_bytes)
@@ -295,6 +298,7 @@ class CommandExecution(Thread):
 
     def run(self) -> None:
         self._trace.start()
+        self._prepare()
         try:
             self._device.write(self._mosi.get_frame())
         except serial.SerialTimeoutException as _x:
@@ -306,13 +310,25 @@ class CommandExecution(Thread):
         self._trace.command_sent()
         sleep(self._command.timeout_ms / 1000)
         self._trace.reading_started()
-        response_data = self._device.read_all()
+        try:
+            response_data = self._device.read_all()
+        except serial.SerialTimeoutException as _x:
+            self._error = DeviceCommunicationError(
+                f'Timeout occurred during attempt to read response on <{self._command.name}> command. '
+                f'Root cause: {str(_x)}'
+            )
+
         try:
             self._miso = MISOFrame(response_data)
+            if self._callback_fnc is not None:
+                self._callback_fnc(self._miso)
         except SHDLCError as _x:
             self._error = _x
 
         self._trace.end()
+
+    def _prepare(self):
+        pass
 
     def get_mosi(self) -> MOSIFrame:
         return self._mosi
@@ -398,6 +414,9 @@ class WakeUp(CommandExecution):
     def __init__(self, device: serial.Serial):
         CommandExecution.__init__(self, device, CMD_WAKEUP, bytes())
 
+    def _prepare(self) -> None:
+        self._device.write(bytes([0xFF]))
+
 
 class StartFanCleaning(CommandExecution):
     """
@@ -423,7 +442,7 @@ class WriteAutoCleaningInterval(CommandExecution):
     """
 
     def __init__(self, device: serial.Serial, ac_interval_s: int):
-        if ac_interval_s <= 0 or ac_interval_s >= 2^32:
+        if ac_interval_s <= 0 or ac_interval_s >= 2 ^ 32:
             raise ConfigurationError(f"Ato cleaning interval {ac_interval_s} is out of acceptable bounds "
                                      f"(should be unsigned 32-bit int)")
 
@@ -521,15 +540,85 @@ class ParticulateMatterSensor:
 
         return action
 
-    def wake_up(self, callback_fnc=None) -> CommandExecution:
-        return self._handle_action(
-            action=WakeUp(device=self._active_device()),
-            callback_fnc=callback_fnc
-        )
-
     def start_measurement(self, callback_fnc=None) -> CommandExecution:
         return self._handle_action(
             action=StartMeasurement(device=self._active_device()),
             callback_fnc=callback_fnc
         )
 
+    def stop_measurement(self, callback_fnc=None) -> CommandExecution:
+        return self._handle_action(
+            action=StopMeasurement(device=self._active_device()),
+            callback_fnc=callback_fnc
+        )
+
+    def read_measured_values(self, callback_fnc=None) -> CommandExecution:
+        return self._handle_action(
+            action=ReadMeasuredValues(device=self._active_device()),
+            callback_fnc=callback_fnc
+        )
+
+    def sleep(self, callback_fnc=None) -> CommandExecution:
+        return self._handle_action(
+            action=Sleep(device=self._active_device()),
+            callback_fnc=callback_fnc
+        )
+
+    def wake_up(self, callback_fnc=None) -> CommandExecution:
+        return self._handle_action(
+            action=WakeUp(device=self._active_device()),
+            callback_fnc=callback_fnc
+        )
+
+    def start_fan_cleaning(self, callback_fnc=None) -> CommandExecution:
+        return self._handle_action(
+            action=StartFanCleaning(device=self._active_device()),
+            callback_fnc=callback_fnc
+        )
+
+    def get_auto_cleaning_interval(self, callback_fnc=None) -> CommandExecution:
+        return self._handle_action(
+            action=ReadAutoCleaningInterval(device=self._active_device()),
+            callback_fnc=callback_fnc
+        )
+
+    def set_auto_cleaning_interval(self, interval_s: int, callback_fnc=None) -> CommandExecution:
+        return self._handle_action(
+            action=WriteAutoCleaningInterval(device=self._active_device(), ac_interval_s=interval_s),
+            callback_fnc=callback_fnc
+        )
+
+    def get_product_type(self, callback_fnc=None) -> CommandExecution:
+        return self._handle_action(
+            action=DeviceInformationProductType(device=self._active_device()),
+            callback_fnc=callback_fnc
+        )
+
+    def get_serial_number(self, callback_fnc=None) -> CommandExecution:
+        return self._handle_action(
+            action=DeviceInformationSerialNumber(device=self._active_device()),
+            callback_fnc=callback_fnc
+        )
+
+    def get_version(self, callback_fnc=None) -> CommandExecution:
+        return self._handle_action(
+            action=ReadVersion(device=self._active_device()),
+            callback_fnc=callback_fnc
+        )
+
+    def get_status(self, callback_fnc=None) -> CommandExecution:
+        return self._handle_action(
+            action=ReadDeviceStatusRegister(device=self._active_device()),
+            callback_fnc=callback_fnc
+        )
+
+    def reset(self, callback_fnc=None) -> CommandExecution:
+        return self._handle_action(
+            action=DeviceReset(device=self._active_device()),
+            callback_fnc=callback_fnc
+        )
+
+
+if __name__ == "__main__":
+    sensor = ParticulateMatterSensor()
+    sensor.read_measured_values()
