@@ -50,9 +50,21 @@ class SHDLCError(Exception):
 
 class ResponseFrameError(SHDLCError):
 
-    def __init__(self, msg: str, data=None):
+    def __init__(self, msg: str, data: bytes):
         SHDLCError.__init__(self, f'The received frame has incorrect structure or content. {msg}')
         self.original_bytes_received: bytes = data
+
+
+class NoDataInResponse(ResponseFrameError):
+
+    def __init__(self):
+        ResponseFrameError.__init__(
+            self,
+            f"No data received for the sensor. "
+            f"This may be caused by not connected or wrongly connected hardware. "
+            f"Check if TX\RX are cross-connected (i.e. TX of RPi goes to RX in sensor)",
+            bytes()
+        )
 
 
 class DeviceError(SHDLCError):
@@ -67,13 +79,16 @@ class DeviceCommunicationError(SHDLCError):
         SHDLCError.__init__(self, f'There was a problem with communicating with the device. {msg}')
 
 
-class ResponseError(SHDLCError):
+class ResponseError(ResponseFrameError):
 
-    def __init__(self, error_code: int):
+    def __init__(self, error_code: int, data: bytes):
         self.error_code = error_code
         self.error = ERRORS[error_code] if error_code in ERRORS else "Unknown error"
-        SHDLCError.__init__(self, f'The device responded with '
-                                  f'the following error code: 0x{error_code:X} ({self.error})')
+        ResponseFrameError.__init__(
+            self,
+            f'The device responded with the following error code: 0x{error_code:X} ({self.error})',
+            data
+        )
 
 
 class ConfigurationError(SHDLCError):
@@ -151,7 +166,7 @@ class MISOFrame:
         self.raw_frame_bytes = bytes_received
 
         if self.raw_frame_bytes is None or len(self.raw_frame_bytes) == 0:
-            raise ResponseFrameError(f'The sensor has not sent any data')
+            raise NoDataInResponse()
         if len(self.raw_frame_bytes) < 7:
             raise ResponseFrameError(f'The length of received data from the sensor '
                                      f'is unexpectedly short ({len(self.raw_frame_bytes)} bytes), '
@@ -193,7 +208,7 @@ class MISOFrame:
             raise DeviceError()
 
         if _state:
-            raise ResponseError(_state)
+            raise ResponseError(_state, self.raw_frame_bytes)
 
         _data_length = self.frame_bytes[4]
         if not (0 <= _data_length <= 255):
@@ -312,18 +327,17 @@ class CommandExecution(Thread):
         self._trace.reading_started()
         try:
             response_data = self._device.read_all()
+            try:
+                self._miso = MISOFrame(response_data)
+                if self._callback_fnc is not None:
+                    self._callback_fnc(self._miso)
+            except SHDLCError as _x:
+                self._error = _x
         except serial.SerialTimeoutException as _x:
             self._error = DeviceCommunicationError(
                 f'Timeout occurred during attempt to read response on <{self._command.name}> command. '
                 f'Root cause: {str(_x)}'
             )
-
-        try:
-            self._miso = MISOFrame(response_data)
-            if self._callback_fnc is not None:
-                self._callback_fnc(self._miso)
-        except SHDLCError as _x:
-            self._error = _x
 
         self._trace.end()
 

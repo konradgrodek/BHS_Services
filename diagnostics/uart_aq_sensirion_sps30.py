@@ -12,12 +12,6 @@ sys.path.append('..')
 from device.dev_serial_sps30 import *
 
 
-# class Action:
-#
-#     def __init__(self, command_exe: CommandExecution):
-#         self.command_exe = command_exe
-
-
 def menu(actions_menu: dict) -> Table:
     _menu = Table()
     _menu.add_column("Key", style="red")
@@ -33,7 +27,7 @@ def info(history: list, current: list) -> Table:
     for _log_entry in reversed(current):
         _tab.add_row(Text(_log_entry, style=Style(color="orange4")))
     for _log_entry in reversed(history):
-        _tab.add_row(Text(_log_entry))
+        _tab.add_row(_log_entry)
 
     return _tab
 
@@ -42,7 +36,12 @@ def frames(frames_list: list) -> Table:
     _tab = Table(show_header=False, show_edge=False)
 
     for frame in frames_list:
-        _tab.add_row(Text(repr(frame)))
+        if isinstance(frame, MOSIFrame) or isinstance(frame, MISOFrame):
+            _tab.add_row(Text(repr(frame)))
+        elif isinstance(frame, bytes) and len(frame) > 0:
+            _tab.add_row(Text(str_bytes(frame), style=Style(color="red")))
+        else:
+            _tab.add_row(Text(f"~~~ NULL ~~~", style=Style(color="red")))
 
     return _tab
 
@@ -81,13 +80,13 @@ if __name__ == "__main__":
         console.print_exception()
         exit(1)
 
-    the_log = [f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} Port open for {str(sensor.device)}"]
+    the_log = [Text(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} Port open for {str(sensor.device)}")]
 
     requests_history = list()
     responses_history = list()
 
     def collect_response(response: MISOFrame):
-        responses_history.append(response)
+       responses_history.append(response)
 
     actions = {
         "1": ("Wake up", lambda: sensor.wake_up(collect_response)),
@@ -118,7 +117,7 @@ if __name__ == "__main__":
             if isinstance(action, int):
                 exit(action)
             elif isinstance(action, str):
-                the_log.append(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} {action}")
+                the_log.append(Text(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} {action}"))
             else:  # CommandExecution
                 requests_history.append(action.get_mosi())
                 while True:
@@ -134,11 +133,17 @@ if __name__ == "__main__":
                     action.join(timeout=0.2)
                     if not action.is_alive():
                         try:
-                            the_log.extend(action.get_trace().collect_log())
+                            the_log.extend([Text(_le) for _le in action.get_trace().collect_log()])
                             action.raise_error()
                         except SHDLCError as _x:
-                            the_log.append(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} {str(_x)}")
+                            the_log.append(Text(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} {str(_x)}",
+                                                style=Style(color="red")))
+                            if isinstance(_x, ResponseFrameError):
+                                responses_history.append(_x.original_bytes_received)
                         break
+        else:
+            the_log.append(Text(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} Ignored command '{key}'",
+                                style=Style(color="orange1")))
 
 
 
