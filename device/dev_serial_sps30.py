@@ -51,7 +51,8 @@ class SHDLCError(Exception):
 class ResponseFrameError(SHDLCError):
 
     def __init__(self, msg: str, data: bytes):
-        SHDLCError.__init__(self, f'The received frame has incorrect structure or content. {msg}')
+        SHDLCError.__init__(self, f'The received frame has incorrect structure or signalizes an error. {msg}. '
+                                  f'Frame content: {str_bytes(data)}')
         self.original_bytes_received: bytes = data
 
 
@@ -60,9 +61,9 @@ class NoDataInResponse(ResponseFrameError):
     def __init__(self):
         ResponseFrameError.__init__(
             self,
-            f"No data received for the sensor. "
-            f"This may be caused by not connected or wrongly connected hardware. "
-            f"Check if TX\RX are cross-connected (i.e. TX of RPi goes to RX in sensor)",
+            f"No data received for the sensor. Maybe the sensor is put to sleep? "
+            f"This may also be caused by not connected or wrongly connected hardware. "
+            f"Check if TX\\RX are cross-connected (i.e. TX of RPi goes to RX in sensor)",
             bytes()
         )
 
@@ -81,13 +82,25 @@ class DeviceCommunicationError(SHDLCError):
 
 class ResponseError(ResponseFrameError):
 
-    def __init__(self, error_code: int, data: bytes):
+    def __init__(self, error_code: int, data: bytes, msg=None):
         self.error_code = error_code
         self.error = ERRORS[error_code] if error_code in ERRORS else "Unknown error"
         ResponseFrameError.__init__(
             self,
-            f'The device responded with the following error code: 0x{error_code:X} ({self.error})',
+            f'The device responded with the following error code: 0x{error_code:X} ({self.error})'
+            if msg is None else msg,
             data
+        )
+
+
+class CommandNotAllowed(SHDLCError):
+
+    def __init__(self, data: bytes):
+        self.original_bytes_received: bytes = data
+        SHDLCError.__init__(
+            self,
+            f"The command is not allowed in current state. "
+            f"Make sure the sequence of commands ensures correct internal state of the sensor"
         )
 
 
@@ -97,8 +110,23 @@ class ConfigurationError(SHDLCError):
         SHDLCError.__init__(self, f'The used parameter is incorrect. {msg}')
 
 
+class NoNewMeasurement(SHDLCError):
+
+    def __init__(self):
+        SHDLCError.__init__(self, f"The sensor insists there are no new measurements at the moment. "
+                                  f"The reason is either too short period between subsequent measurements or "
+                                  f"incorrect device state (measurement not started). "
+                                  f"Ensure both reasons are checked and try again")
+
+
+class ResponseCorrupted(ResponseFrameError):
+
+    def __init__(self, msg: str, data: bytes):
+        ResponseFrameError.__init__(self, msg, data)
+
+
 def str_bytes(content: bytes):
-    return "|".join([f"0x{_b:X}" for _b in content])
+    return "|".join([f"0x{_b:02X}" for _b in content])
 
 
 class MOSIFrame:
@@ -169,8 +197,7 @@ class MISOFrame:
             raise NoDataInResponse()
         if len(self.raw_frame_bytes) < 7:
             raise ResponseFrameError(f'The length of received data from the sensor '
-                                     f'is unexpectedly short ({len(self.raw_frame_bytes)} bytes), '
-                                     f'full frame: {str_bytes(self.raw_frame_bytes)}', self.raw_frame_bytes)
+                                     f'is unexpectedly short ({len(self.raw_frame_bytes)} bytes)', self.raw_frame_bytes)
         if self.raw_frame_bytes[0] != FRAME_START:
             raise ResponseFrameError(f'The first byte is not a start-byte, expected 0x{FRAME_START:X}, '
                                      f'actual 0x{self.raw_frame_bytes[0]:X}', self.raw_frame_bytes)
@@ -189,8 +216,8 @@ class MISOFrame:
                     self.frame_bytes.append(self.BYTES_DISEMBOWELLING[self.raw_frame_bytes[_i+1]])
                 else:
                     raise ResponseFrameError(f"Incorrect byte-stuffing found: "
-                                             f"{str_bytes(self.raw_frame_bytes[_i:_i+2])}, "
-                                             f"full frame: {str_bytes(self.raw_frame_bytes)}", self.raw_frame_bytes)
+                                             f"{str_bytes(self.raw_frame_bytes[_i:_i+2])}",
+                                             self.raw_frame_bytes)
                 _i += 2
             else:
                 self.frame_bytes.append(self.raw_frame_bytes[_i])
@@ -199,37 +226,126 @@ class MISOFrame:
 
         self.command = {cmd.code: cmd for cmd in COMMANDS}.get(self.frame_bytes[2])
         if self.command is None:
-            raise ResponseFrameError(f'The second byte is not a valid command: 0x{self.frame_bytes[2]:X}. '
-                                     f'Full frame: {str_bytes(self.raw_frame_bytes)}', self.raw_frame_bytes)
+            raise ResponseFrameError(f'The second byte is not a valid command: 0x{self.frame_bytes[2]:X}',
+                                     self.raw_frame_bytes)
 
         _state = self.frame_bytes[3]
         # The first bit (b7) indicates that at least one of the error flags is set in the Device Status Register
         if _state & 2 ** 7:
-            raise DeviceError()
+            if self.command not in (CMD_STATUS, CMD_VERSION, CMD_INFO, CMD_SLEEP, CMD_WAKEUP):
+                raise DeviceError()
+            # clear the error flag and proceed
+            _state = _state & (2 ** 7 - 1)
 
         if _state:
-            raise ResponseError(_state, self.raw_frame_bytes)
+            raise ResponseError(_state, self.raw_frame_bytes) if _state != 0x43 else \
+                CommandNotAllowed(self.raw_frame_bytes)
 
         _data_length = self.frame_bytes[4]
         if not (0 <= _data_length <= 255):
-            raise ResponseFrameError(f"The length of data indicated {_data_length} is out of acceptable boundaries. "
-                                     f"Full frame: {str_bytes(self.raw_frame_bytes)}", self.raw_frame_bytes)
+            raise ResponseFrameError(f"The length of data indicated {_data_length} is out of acceptable boundaries",
+                                     self.raw_frame_bytes)
         if len(self.frame_bytes) - _data_length != 7:
             raise ResponseFrameError(f"The length of data indicated {_data_length} is incorrect, "
-                                     f"expected {len(self.frame_bytes)-7}. "
-                                     f"Full frame: {str_bytes(self.raw_frame_bytes)}", self.raw_frame_bytes)
+                                     f"expected {len(self.frame_bytes)-7}",
+                                     self.raw_frame_bytes)
 
-        self.data = self.frame_bytes[5:5+_data_length]
+        self.data = bytes(self.frame_bytes[5:5+_data_length])
 
         _chk = self.frame_bytes[-2]
         _act_chk = 0xFF - (sum(self.frame_bytes[1:-2]) % 0x100)
         if _chk != _act_chk:
             raise ResponseFrameError(f"Wrong checksum detected. "
-                                     f"Expected 0x{_act_chk:X}, received: 0x{_chk:X}. "
-                                     f"Full frame: {str_bytes(self.raw_frame_bytes)}", self.raw_frame_bytes)
+                                     f"Expected 0x{_act_chk:X}, received: 0x{_chk:X}",
+                                     self.raw_frame_bytes)
+        
+        # just to have consistent typing
+        self.frame_bytes = bytes(self.frame_bytes)
 
     def __repr__(self):
         return str_bytes(self.raw_frame_bytes)
+
+    def interpret_data(self) -> dict:
+        if self.command == CMD_START:
+            return {}
+        if self.command == CMD_STOP:
+            return {}
+        if self.command == CMD_MEASURE:
+            if len(self.data) == 0:
+                raise NoNewMeasurement()
+            if len(self.data) != 20:
+                raise ResponseCorrupted(f"It is expected that executing 0x{self.command.code:02X} {self.command.name} "
+                                        f"will provide 20-bytes length result whereas {len(self.data)} bytes was found",
+                                        self.data)
+            return {
+                "PM1_0": int.from_bytes(self.data[0:2], byteorder="big"),
+                "PM2_5": int.from_bytes(self.data[2:4], byteorder="big"),
+                "PM4_0": int.from_bytes(self.data[4:6], byteorder="big"),
+                "PM10": int.from_bytes(self.data[6:8], byteorder="big"),
+                "PM0_5#": int.from_bytes(self.data[9:10], byteorder="big"),
+                "PM1_0#": int.from_bytes(self.data[10:12], byteorder="big"),
+                "PM2_5#": int.from_bytes(self.data[12:14], byteorder="big"),
+                "PM4_0#": int.from_bytes(self.data[14:16], byteorder="big"),
+                "PM10#": int.from_bytes(self.data[16:18], byteorder="big"),
+                "PS": int.from_bytes(self.data[18:], byteorder="big"),
+            }
+        if self.command == CMD_SLEEP:
+            return {}
+        if self.command == CMD_WAKEUP:
+            return {}
+        if self.command == CMD_CLEAN:
+            return {}
+        if self.command == CMD_SET_AUTO_CLEAN:
+            # to interpret result of this command, the length of the data received is checked
+            # this is to distinguish the response on SET from GET - it is not possible to
+            # determine it otherwise as the command code is exactly the same
+            if len(self.data) == 0:  # SET
+                return {}
+            # GET
+            if len(self.data) != 4:
+                raise ResponseCorrupted(f"It is expected that executing 0x{self.command.code:02X} {self.command.name} "
+                                        f"will provide 4-bytes length result whereas {len(self.data)} bytes was found",
+                                        self.data)
+            return {
+                "auto-clean-interval-seconds": int.from_bytes(self.data, byteorder="big")
+            }
+        if self.command == CMD_INFO:
+            if len(self.data) > 32 or len(self.data) < 2:
+                raise ResponseCorrupted(f"It is expected that executing 0x{self.command.code:02X} {self.command.name} "
+                                        f"will provide up to 31 ASCII characters whereas {len(self.data)} "
+                                        f"bytes was found",
+                                        self.data)
+            return {
+                "info": self.data[:-1].decode("ascii")
+            }
+        if self.command == CMD_VERSION:
+            if len(self.data) != 7:
+                raise ResponseCorrupted(f"It is expected that executing 0x{self.command.code:02X} {self.command.name} "
+                                        f"will provide 7-bytes length result whereas {len(self.data)} bytes was found",
+                                        self.data)
+            return {
+                "firmware": (int.from_bytes(self.data[0:1], byteorder="big"),
+                             int.from_bytes(self.data[1:2], byteorder="big")),
+                "hardware": int.from_bytes(self.data[3:4], byteorder="big"),
+                "protocol": (int.from_bytes(self.data[5:6], byteorder="big"),
+                             int.from_bytes(self.data[6:], byteorder="big")),
+            }
+        if self.command == CMD_STATUS:
+            if len(self.data) != 5:
+                raise ResponseCorrupted(f"It is expected that executing 0x{self.command.code:02X} {self.command.name} "
+                                        f"will provide 5-bytes length response whereas {len(self.data)} bytes was found",
+                                        self.data)
+            register = int.from_bytes(self.data[0:5], byteorder="big")
+            return {
+                "speed-warning": (register & (2 ** 21)) > 0,
+                "laser-error": (register & (2 ** 5)) > 0,
+                "fan-error": (register & (2 ** 4)) > 0,
+                "register": f"{register:b}"
+            }
+        if self.command == CMD_RESET:
+            return {}
+
+        raise NotImplementedError(f"The command 0x{self.command.code:02X} {self.command.name} is not supported")
 
 
 class CommandExecution(Thread):
@@ -262,22 +378,22 @@ class CommandExecution(Thread):
         def write_duration_ms(self):
             if self.tm_command_sent is None:
                 return None
-            return round((self.tm_command_sent - self.tm_start).total_seconds() / 1000)
+            return round((self.tm_command_sent - self.tm_start).total_seconds() * 1000)
 
         def read_duration_ms(self):
             if self.tm_end is None:
                 return None
-            return round((self.tm_end - self.tm_reading_started).total_seconds() / 1000)
+            return round((self.tm_end - self.tm_reading_started).total_seconds() * 1000)
 
         def total_duration_ms(self):
             if self.tm_end is None:
                 return None
-            return round((self.tm_end - self.tm_start).total_seconds() / 1000)
+            return round((self.tm_end - self.tm_start).total_seconds() * 1000)
 
         def collect_log(self, include_timestamps=True) -> list:
             _log = list([self._log(
                 self.tm_start,
-                f'Executing command 0x{self._command.code:X} {self._command.name}',
+                f'Executing command 0x{self._command.code:02X} {self._command.name}',
                 include_timestamps
             )])
             if self.tm_command_sent is not None:
@@ -457,8 +573,8 @@ class WriteAutoCleaningInterval(CommandExecution):
 
     def __init__(self, device: serial.Serial, ac_interval_s: int):
         if ac_interval_s <= 0 or ac_interval_s >= 2 ^ 32:
-            raise ConfigurationError(f"Ato cleaning interval {ac_interval_s} is out of acceptable bounds "
-                                     f"(should be unsigned 32-bit int)")
+            raise ConfigurationError(f"Auto cleaning interval {ac_interval_s} is out of the acceptable bounds "
+                                     f"(should be an unsigned 32-bit int)")
 
         CommandExecution.__init__(self, device, CMD_SET_AUTO_CLEAN,
                                   bytes([0x00])+ac_interval_s.to_bytes(4, byteorder='big'))
@@ -500,8 +616,8 @@ class ReadDeviceStatusRegister(CommandExecution):
     by the Error-Flag in the state byte.
     """
 
-    def __init__(self, device: serial.Serial):
-        CommandExecution.__init__(self, device, CMD_STATUS, bytes())
+    def __init__(self, device: serial.Serial, clear_after_reading=False):
+        CommandExecution.__init__(self, device, CMD_STATUS, bytes([0x01 if clear_after_reading else 0x00]))
 
 
 class DeviceReset(CommandExecution):
@@ -520,10 +636,10 @@ class ParticulateMatterSensor:
     READ_TIMEOUT_MS = 1000
     WRITE_TIMEOUT_MS = 1000
 
-    def __init__(self):
+    def __init__(self, port="/dev/ttyAMA0"):
         try:
             self.device = serial.Serial(
-                port="/dev/ttyAMA0",
+                port=port,
                 baudrate=115200,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
