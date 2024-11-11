@@ -4,9 +4,10 @@
 
 import serial
 
-from collections import namedtuple
+from collections import namedtuple, deque
+from enum import Enum
 from functools import reduce
-from threading import Thread
+from threading import Thread, Event, Lock
 from datetime import datetime
 from time import sleep
 
@@ -61,7 +62,7 @@ class NoDataInResponse(ResponseFrameError):
     def __init__(self):
         ResponseFrameError.__init__(
             self,
-            f"No data received for the sensor. Maybe the sensor is put to sleep? "
+            f"No data received from the sensor. Maybe it is put to sleep? "
             f"This may also be caused by not connected or wrongly connected hardware. "
             f"Check if TX\\RX are cross-connected (i.e. TX of RPi goes to RX in sensor)",
             bytes()
@@ -104,6 +105,17 @@ class CommandNotAllowed(SHDLCError):
         )
 
 
+class CommandNotSupported(SHDLCError):
+
+    def __init__(self, command: Command, firmware_version: tuple):
+        SHDLCError.__init__(
+            self,
+            f"Your sensor do not allow to run the command 0x{command.code:02X} {command.name}. "
+            f"Your firmware version is {firmware_version[0]}.{firmware_version[1]}, "
+            f"whereas the minimal required version is {command.min_version[0]}.{command.min_version[1]}"
+        )
+
+
 class ConfigurationError(SHDLCError):
 
     def __init__(self, msg: str):
@@ -127,6 +139,28 @@ class ResponseCorrupted(ResponseFrameError):
 
 def str_bytes(content: bytes):
     return "|".join([f"0x{_b:02X}" for _b in content])
+
+
+Measurement = namedtuple('Measurement', [
+    'mass_concentration_pm_1_0_ug_m3',
+    'mass_concentration_pm_2_5_ug_m3',
+    'mass_concentration_pm_4_0_ug_m3',
+    'mass_concentration_pm_10_ug_m3',
+    'number_concentration_pm_0_5_per_cm3',
+    'number_concentration_pm_1_0_per_cm3',
+    'number_concentration_pm_2_5_per_cm3',
+    'number_concentration_pm_4_0_per_cm3',
+    'number_concentration_pm_10_per_cm3',
+    'typical_particle_size_um'
+])
+
+AutoCleanInterval = namedtuple('AutoCleanInterval', ['interval_s'])
+
+DeviceInfo = namedtuple('DeviceInformation', ['info'])
+
+Versions = namedtuple('Version', ['firmware', 'hardware', 'protocol'])
+
+DeviceStatus = namedtuple('DeviceStatus', ['speed_warning', 'laser_error', 'fan_error', 'register'])
 
 
 class MOSIFrame:
@@ -265,7 +299,7 @@ class MISOFrame:
     def __repr__(self):
         return str_bytes(self.raw_frame_bytes)
 
-    def interpret_data(self) -> dict:
+    def interpret_data(self) -> namedtuple:
         if self.command == CMD_START:
             return {}
         if self.command == CMD_STOP:
@@ -277,18 +311,19 @@ class MISOFrame:
                 raise ResponseCorrupted(f"It is expected that executing 0x{self.command.code:02X} {self.command.name} "
                                         f"will provide 20-bytes length result whereas {len(self.data)} bytes was found",
                                         self.data)
-            return {
-                "PM1_0": int.from_bytes(self.data[0:2], byteorder="big"),
-                "PM2_5": int.from_bytes(self.data[2:4], byteorder="big"),
-                "PM4_0": int.from_bytes(self.data[4:6], byteorder="big"),
-                "PM10": int.from_bytes(self.data[6:8], byteorder="big"),
-                "PM0_5#": int.from_bytes(self.data[9:10], byteorder="big"),
-                "PM1_0#": int.from_bytes(self.data[10:12], byteorder="big"),
-                "PM2_5#": int.from_bytes(self.data[12:14], byteorder="big"),
-                "PM4_0#": int.from_bytes(self.data[14:16], byteorder="big"),
-                "PM10#": int.from_bytes(self.data[16:18], byteorder="big"),
-                "PS": int.from_bytes(self.data[18:], byteorder="big"),
-            }
+
+            return Measurement(
+                mass_concentration_pm_1_0_ug_m3=int.from_bytes(self.data[0:2], byteorder="big"),
+                mass_concentration_pm_2_5_ug_m3=int.from_bytes(self.data[2:4], byteorder="big"),
+                mass_concentration_pm_4_0_ug_m3=int.from_bytes(self.data[4:6], byteorder="big"),
+                mass_concentration_pm_10_ug_m3=int.from_bytes(self.data[6:8], byteorder="big"),
+                number_concentration_pm_0_5_per_cm3=int.from_bytes(self.data[9:10], byteorder="big"),
+                number_concentration_pm_1_0_per_cm3=int.from_bytes(self.data[10:12], byteorder="big"),
+                number_concentration_pm_2_5_per_cm3=int.from_bytes(self.data[12:14], byteorder="big"),
+                number_concentration_pm_4_0_per_cm3=int.from_bytes(self.data[14:16], byteorder="big"),
+                number_concentration_pm_10_per_cm3=int.from_bytes(self.data[16:18], byteorder="big"),
+                typical_particle_size_um=int.from_bytes(self.data[18:], byteorder="big")
+            )
         if self.command == CMD_SLEEP:
             return {}
         if self.command == CMD_WAKEUP:
@@ -306,42 +341,38 @@ class MISOFrame:
                 raise ResponseCorrupted(f"It is expected that executing 0x{self.command.code:02X} {self.command.name} "
                                         f"will provide 4-bytes length result whereas {len(self.data)} bytes was found",
                                         self.data)
-            return {
-                "auto-clean-interval-seconds": int.from_bytes(self.data, byteorder="big")
-            }
+            return AutoCleanInterval(interval_s=int.from_bytes(self.data, byteorder="big"))
         if self.command == CMD_INFO:
             if len(self.data) > 32 or len(self.data) < 2:
                 raise ResponseCorrupted(f"It is expected that executing 0x{self.command.code:02X} {self.command.name} "
                                         f"will provide up to 31 ASCII characters whereas {len(self.data)} "
                                         f"bytes was found",
                                         self.data)
-            return {
-                "info": self.data[:-1].decode("ascii")
-            }
+            return DeviceInfo(info=self.data[:-1].decode("ascii"))
         if self.command == CMD_VERSION:
             if len(self.data) != 7:
                 raise ResponseCorrupted(f"It is expected that executing 0x{self.command.code:02X} {self.command.name} "
                                         f"will provide 7-bytes length result whereas {len(self.data)} bytes was found",
                                         self.data)
-            return {
-                "firmware": (int.from_bytes(self.data[0:1], byteorder="big"),
-                             int.from_bytes(self.data[1:2], byteorder="big")),
-                "hardware": int.from_bytes(self.data[3:4], byteorder="big"),
-                "protocol": (int.from_bytes(self.data[5:6], byteorder="big"),
-                             int.from_bytes(self.data[6:], byteorder="big")),
-            }
+            return Versions(
+                firmware=(int.from_bytes(self.data[0:1], byteorder="big"),
+                          int.from_bytes(self.data[1:2], byteorder="big")),
+                hardware=int.from_bytes(self.data[3:4], byteorder="big"),
+                protocol=(int.from_bytes(self.data[5:6], byteorder="big"),
+                          int.from_bytes(self.data[6:], byteorder="big"))
+            )
         if self.command == CMD_STATUS:
             if len(self.data) != 5:
                 raise ResponseCorrupted(f"It is expected that executing 0x{self.command.code:02X} {self.command.name} "
                                         f"will provide 5-bytes length response whereas {len(self.data)} bytes was found",
                                         self.data)
             register = int.from_bytes(self.data[0:5], byteorder="big")
-            return {
-                "speed-warning": (register & (2 ** 21)) > 0,
-                "laser-error": (register & (2 ** 5)) > 0,
-                "fan-error": (register & (2 ** 4)) > 0,
-                "register": f"{register:b}"
-            }
+            return DeviceStatus(
+                speed_warning=(register & (2 ** 21)) > 0,
+                laser_error=(register & (2 ** 5)) > 0,
+                fan_error=(register & (2 ** 4)) > 0,
+                register=f"{register:b}"
+            )
         if self.command == CMD_RESET:
             return {}
 
@@ -359,16 +390,16 @@ class CommandExecution(Thread):
             self.tm_reading_started = None
             self.tm_end = None
 
-        def start(self):
+        def mark_start(self):
             self.tm_start = datetime.now()
 
-        def command_sent(self):
+        def mark_command_sent(self):
             self.tm_command_sent = datetime.now()
 
-        def reading_started(self):
+        def mark_reading_started(self):
             self.tm_reading_started = datetime.now()
 
-        def end(self):
+        def mark_end(self):
             self.tm_end = datetime.now()
 
         @staticmethod
@@ -417,9 +448,10 @@ class CommandExecution(Thread):
                 ))
             return _log
 
-    def __init__(self, device: serial.Serial, command: Command, data: bytes):
+    def __init__(self, device: serial.Serial, device_lock: Lock, command: Command, data: bytes):
         Thread.__init__(self)
         self._device = device
+        self._device_lock = device_lock
         self._command = command
         self._mosi = MOSIFrame(command, data)
         self._miso = None
@@ -428,7 +460,8 @@ class CommandExecution(Thread):
         self._trace = self.CommandExecutionTrace(command)
 
     def run(self) -> None:
-        self._trace.start()
+        self._trace.mark_start()
+        self._device_lock.acquire()
         self._prepare()
         try:
             self._device.write(self._mosi.get_frame())
@@ -438,9 +471,9 @@ class CommandExecution(Thread):
                 f'Root cause: {str(_x)}'
             )
             return
-        self._trace.command_sent()
+        self._trace.mark_command_sent()
         sleep(self._command.timeout_ms / 1000)
-        self._trace.reading_started()
+        self._trace.mark_reading_started()
         try:
             response_data = self._device.read_all()
             try:
@@ -454,8 +487,8 @@ class CommandExecution(Thread):
                 f'Timeout occurred during attempt to read response on <{self._command.name}> command. '
                 f'Root cause: {str(_x)}'
             )
-
-        self._trace.end()
+        self._device_lock.release()
+        self._trace.mark_end()
 
     def _prepare(self):
         pass
@@ -495,8 +528,9 @@ class StartMeasurement(CommandExecution):
     the Measurement-Mode needs to be started using this command
     """
 
-    def __init__(self, device: serial.Serial):
-        CommandExecution.__init__(self, device, CMD_START, bytes([0x01, 0x05]))
+    def __init__(self, device: serial.Serial, device_lock: Lock):
+        CommandExecution.__init__(self, device=device, device_lock=device_lock,
+                                  command=CMD_START, data=bytes([0x01, 0x05]))
 
 
 class StopMeasurement(CommandExecution):
@@ -504,8 +538,8 @@ class StopMeasurement(CommandExecution):
     Stops the measurement. Use this command to return to the initial state (Idle-Mode).
     """
 
-    def __init__(self, device: serial.Serial):
-        CommandExecution.__init__(self, device, CMD_STOP, bytes())
+    def __init__(self, device: serial.Serial, device_lock: Lock):
+        CommandExecution.__init__(self, device=device, device_lock=device_lock, command=CMD_STOP, data=bytes())
 
 
 class ReadMeasuredValues(CommandExecution):
@@ -514,8 +548,8 @@ class ReadMeasuredValues(CommandExecution):
     The measurement interval is 1 second.
     """
 
-    def __init__(self, device: serial.Serial):
-        CommandExecution.__init__(self, device, CMD_MEASURE, bytes())
+    def __init__(self, device: serial.Serial, device_lock: Lock):
+        CommandExecution.__init__(self, device=device, device_lock=device_lock, command=CMD_MEASURE, data=bytes())
 
 
 class Sleep(CommandExecution):
@@ -524,8 +558,8 @@ class Sleep(CommandExecution):
     note the wakeup sequence described at the Wake-up command.
     """
 
-    def __init__(self, device: serial.Serial):
-        CommandExecution.__init__(self, device, CMD_SLEEP, bytes())
+    def __init__(self, device: serial.Serial, device_lock: Lock):
+        CommandExecution.__init__(self, device=device, device_lock=device_lock, command=CMD_SLEEP, data=bytes())
 
 
 class WakeUp(CommandExecution):
@@ -541,8 +575,8 @@ class WakeUp(CommandExecution):
     correctly.
     """
 
-    def __init__(self, device: serial.Serial):
-        CommandExecution.__init__(self, device, CMD_WAKEUP, bytes())
+    def __init__(self, device: serial.Serial, device_lock: Lock):
+        CommandExecution.__init__(self, device=device, device_lock=device_lock, command=CMD_WAKEUP, data=bytes())
 
     def _prepare(self) -> None:
         self._device.write(bytes([0xFF]))
@@ -553,8 +587,8 @@ class StartFanCleaning(CommandExecution):
     Starts the fan-cleaning manually
     """
 
-    def __init__(self, device: serial.Serial):
-        CommandExecution.__init__(self, device, CMD_CLEAN, bytes())
+    def __init__(self, device: serial.Serial, device_lock: Lock):
+        CommandExecution.__init__(self, device=device, device_lock=device_lock, command=CMD_CLEAN, data=bytes())
 
 
 class ReadAutoCleaningInterval(CommandExecution):
@@ -562,8 +596,9 @@ class ReadAutoCleaningInterval(CommandExecution):
     Reads the interval [s] of the periodic fan-cleaning
     """
 
-    def __init__(self, device: serial.Serial):
-        CommandExecution.__init__(self, device, CMD_SET_AUTO_CLEAN, bytes([0x00]))
+    def __init__(self, device: serial.Serial, device_lock: Lock):
+        CommandExecution.__init__(self, device=device, device_lock=device_lock,
+                                  command=CMD_SET_AUTO_CLEAN, data=bytes([0x00]))
 
 
 class WriteAutoCleaningInterval(CommandExecution):
@@ -571,13 +606,13 @@ class WriteAutoCleaningInterval(CommandExecution):
     Writes the interval [s] of the periodic fan-cleaning
     """
 
-    def __init__(self, device: serial.Serial, ac_interval_s: int):
+    def __init__(self, device: serial.Serial, device_lock: Lock, ac_interval_s: int):
         if ac_interval_s <= 0 or ac_interval_s >= 2 ^ 32:
             raise ConfigurationError(f"Auto cleaning interval {ac_interval_s} is out of the acceptable bounds "
                                      f"(should be an unsigned 32-bit int)")
 
-        CommandExecution.__init__(self, device, CMD_SET_AUTO_CLEAN,
-                                  bytes([0x00])+ac_interval_s.to_bytes(4, byteorder='big'))
+        CommandExecution.__init__(self, device=device, device_lock=device_lock, command=CMD_SET_AUTO_CLEAN,
+                                  data=bytes([0x00])+ac_interval_s.to_bytes(4, byteorder='big'))
 
 
 class DeviceInformationProductType(CommandExecution):
@@ -586,8 +621,8 @@ class DeviceInformationProductType(CommandExecution):
     32 ASCII characters (including terminating null character).
     """
 
-    def __init__(self, device: serial.Serial):
-        CommandExecution.__init__(self, device, CMD_INFO, bytes([0x00]))
+    def __init__(self, device: serial.Serial, device_lock: Lock):
+        CommandExecution.__init__(self, device=device, device_lock=device_lock, command=CMD_INFO, data=bytes([0x00]))
 
 
 class DeviceInformationSerialNumber(CommandExecution):
@@ -596,8 +631,8 @@ class DeviceInformationSerialNumber(CommandExecution):
     32 ASCII characters (including terminating null character).
     """
 
-    def __init__(self, device: serial.Serial):
-        CommandExecution.__init__(self, device, CMD_INFO, bytes([0x03]))
+    def __init__(self, device: serial.Serial, device_lock: Lock):
+        CommandExecution.__init__(self, device=device, device_lock=device_lock, command=CMD_INFO, data=bytes([0x03]))
 
 
 class ReadVersion(CommandExecution):
@@ -605,8 +640,8 @@ class ReadVersion(CommandExecution):
     Gets version information about the firmware, hardware, and SHDLC protocol.
     """
 
-    def __init__(self, device: serial.Serial):
-        CommandExecution.__init__(self, device, CMD_VERSION, bytes())
+    def __init__(self, device: serial.Serial, device_lock: Lock):
+        CommandExecution.__init__(self, device=device, device_lock=device_lock, command=CMD_VERSION, data=bytes())
 
 
 class ReadDeviceStatusRegister(CommandExecution):
@@ -616,8 +651,9 @@ class ReadDeviceStatusRegister(CommandExecution):
     by the Error-Flag in the state byte.
     """
 
-    def __init__(self, device: serial.Serial, clear_after_reading=False):
-        CommandExecution.__init__(self, device, CMD_STATUS, bytes([0x01 if clear_after_reading else 0x00]))
+    def __init__(self, device: serial.Serial, device_lock: Lock, clear_after_reading=False):
+        CommandExecution.__init__(self, device=device, device_lock=device_lock,
+                                  command=CMD_STATUS, data=bytes([0x01 if clear_after_reading else 0x00]))
 
 
 class DeviceReset(CommandExecution):
@@ -628,37 +664,39 @@ class DeviceReset(CommandExecution):
     activate the interface
     """
 
-    def __init__(self, device: serial.Serial):
-        CommandExecution.__init__(self, device, CMD_RESET, bytes())
+    def __init__(self, device: serial.Serial, device_lock: Lock):
+        CommandExecution.__init__(self, device=device, device_lock=device_lock, command=CMD_RESET, data=bytes())
 
 
-class ParticulateMatterSensor:
+class SensirionSPS30:
     READ_TIMEOUT_MS = 1000
     WRITE_TIMEOUT_MS = 1000
 
     def __init__(self, port="/dev/ttyAMA0"):
         try:
-            self.device = serial.Serial(
+            self._device = serial.Serial(
                 port=port,
                 baudrate=115200,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
                 bytesize=serial.EIGHTBITS,  # number of data bits
                 exclusive=True,  # port cannot be opened in exclusive access mode if it is already open in this mode
-                timeout=ParticulateMatterSensor.READ_TIMEOUT_MS / 1000,
-                write_timeout=ParticulateMatterSensor.WRITE_TIMEOUT_MS / 1000
+                timeout=SensirionSPS30.READ_TIMEOUT_MS / 1000,
+                write_timeout=SensirionSPS30.WRITE_TIMEOUT_MS / 1000
             )
         except serial.SerialException as _x:
             raise DeviceCommunicationError(f"The UART port cannot be initialized. Root cause: {str(_x)}")
         except ValueError as _x:
             raise ConfigurationError(f"Parameter out of range. Root cause: {str(_x)}")
+        self._device_lock = Lock()
 
     def _active_device(self) -> serial.Serial:
-        if not self.device.is_open:
-            self.device.open()
-        return self.device
+        if not self._device.is_open:
+            self._device.open()
+        return self._device
 
     def _handle_action(self, action: CommandExecution, callback_fnc) -> CommandExecution:
+        self._device_lock.acquire()
         if callback_fnc is not None:
             action.register_callback(callback_fnc)
 
@@ -667,6 +705,7 @@ class ParticulateMatterSensor:
         if callback_fnc is None:
             action.join()
             action.raise_error()  # this will detect error of communication and raise appropriate exception
+        self._device_lock.release()
 
         return action
 
@@ -749,6 +788,117 @@ class ParticulateMatterSensor:
         )
 
 
+class ParticulateMatterMeter:
+
+    class InternalState(Enum):
+        IDLE = 0,
+        SLEEP = -1,
+        MEASUREMENT = 1
+
+    def __init__(self, port="/dev/ttyAMA0"):
+        self._sensor = SensirionSPS30(port=port)
+        # after power on, the sensor is in idle state
+        self._most_probable_internal_state = self.InternalState.IDLE
+        self._versions: Versions = None
+        self._serial_number = None
+
+    def __del__(self):
+        # try to put the sensor to sleep
+        try:
+            self.sleep()
+        except SHDLCError:
+            # silently ignore if unsuccessful
+            pass
+
+    def _ensure_idle(self):
+        try:
+            self._sensor.wake_up()
+        except CommandNotAllowed:
+            # measurement mode, stop it
+            self._sensor.stop_measurement()
+
+    def _get_versions(self) -> Versions:
+        """
+        Provides cached values of:
+        - firmware version as tuple (major, minor)
+        - hardware revision as single number
+        - protocol version  as tuple (major, minor)
+        :return: namedtuple Versions
+        """
+        if self._versions is None:
+            try:
+                self._versions = self._sensor.get_version().get_miso().interpret_data()
+            except NoDataInResponse:
+                # sleep mode, wake the sensor up
+                self._sensor.wake_up()
+                self._versions = self._sensor.get_version().get_miso().interpret_data()
+        return self._versions
+
+    def _validate_command(self, command: Command):
+        if self.get_firmware_ver() < command.min_version:
+            raise CommandNotSupported(
+                command=command,
+                firmware_version=self.get_firmware_ver()
+            )
+
+    def get_firmware_ver(self) -> tuple:
+        return self._get_versions().firmware
+
+    def get_protocol_ver(self) -> tuple:
+        return self._get_versions().protocol
+
+    def get_hardware_rev(self) -> int:
+        return self._get_versions().hardware
+
+    def get_serial_number(self) -> str:
+        if self._serial_number is None:
+            self._validate_command(CMD_INFO)
+            self._serial_number = self._sensor.get_serial_number().get_miso().interpret_data().info
+        return self._serial_number
+
+    def sleep(self):
+        self._validate_command(CMD_SLEEP)
+        try:
+            self._sensor.sleep()
+        except CommandNotAllowed:
+            self._validate_command(CMD_STOP)
+            self._sensor.stop_measurement()
+            self.sleep()
+
+    def measure(self) -> Measurement:
+        self._validate_command(CMD_MEASURE)
+        try:
+            m = self._sensor.read_measured_values().get_miso().interpret_data()
+        except NoDataInResponse:
+            #  most likely the sensor is put into sleep mode, wake it up
+            self._validate_command(CMD_WAKEUP)
+            self._sensor.wake_up()
+            m = self._sensor.read_measured_values().get_miso().interpret_data()
+        except NoNewMeasurement as _x:
+            # check if the measurement is not started
+            self._validate_command(CMD_START)
+            try:
+                self._sensor.start_measurement()
+            except CommandNotAllowed:
+                # no, the measurement is up and running; simply there are no new measurements available
+                raise _x
+            m = self._sensor.read_measured_values().get_miso().interpret_data()
+        return m
+
+    class _ContinuousMeasurement(Thread):
+
+        def __init__(self, results: deque, exit_event: Event):
+            Thread.__init__(self)
+            self._results = results
+            self._exit_event = exit_event
+
+        def run(self):
+            pass
+
+    def continuous_measurement(self, results: deque, exit_event: Event):
+        pass
+
+
 if __name__ == "__main__":
-    sensor = ParticulateMatterSensor()
+    sensor = SensirionSPS30()
     sensor.read_measured_values()

@@ -81,12 +81,12 @@ if __name__ == "__main__":
 
     # console.print(Panel(layout, title="Sensirion SPS-30 sensor diagnostics"))
     try:
-        sensor = ParticulateMatterSensor()
+        sensor = SensirionSPS30()
     except SHDLCError:
         console.print_exception()
         exit(1)
 
-    the_log = [Text(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} Port open for {str(sensor.device)}")]
+    the_log = [Text(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} Port open for {str(sensor._device)}")]
 
     requests_history = list()
     responses_history = list()
