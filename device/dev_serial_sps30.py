@@ -8,7 +8,7 @@ from collections import namedtuple, deque
 from enum import Enum
 from functools import reduce
 from threading import Thread, Event, Lock
-from datetime import datetime
+from datetime import datetime, timedelta
 from time import sleep
 
 Command = namedtuple('Command', ['code', 'name', 'kind', 'timeout_ms', 'min_version'])
@@ -449,7 +449,7 @@ class CommandExecution(Thread):
             return _log
 
     def __init__(self, device: serial.Serial, device_lock: Lock, command: Command, data: bytes):
-        Thread.__init__(self)
+        Thread.__init__(self, name=f"Command 0x{command.code:02X} {command.name} execution")
         self._device = device
         self._device_lock = device_lock
         self._command = command
@@ -696,7 +696,6 @@ class SensirionSPS30:
         return self._device
 
     def _handle_action(self, action: CommandExecution, callback_fnc) -> CommandExecution:
-        self._device_lock.acquire()
         if callback_fnc is not None:
             action.register_callback(callback_fnc)
 
@@ -705,104 +704,131 @@ class SensirionSPS30:
         if callback_fnc is None:
             action.join()
             action.raise_error()  # this will detect error of communication and raise appropriate exception
-        self._device_lock.release()
 
         return action
 
     def start_measurement(self, callback_fnc=None) -> CommandExecution:
         return self._handle_action(
-            action=StartMeasurement(device=self._active_device()),
+            action=StartMeasurement(device=self._active_device(), device_lock=self._device_lock),
             callback_fnc=callback_fnc
         )
 
     def stop_measurement(self, callback_fnc=None) -> CommandExecution:
         return self._handle_action(
-            action=StopMeasurement(device=self._active_device()),
+            action=StopMeasurement(device=self._active_device(), device_lock=self._device_lock),
             callback_fnc=callback_fnc
         )
 
     def read_measured_values(self, callback_fnc=None) -> CommandExecution:
         return self._handle_action(
-            action=ReadMeasuredValues(device=self._active_device()),
+            action=ReadMeasuredValues(device=self._active_device(), device_lock=self._device_lock),
             callback_fnc=callback_fnc
         )
 
     def sleep(self, callback_fnc=None) -> CommandExecution:
         return self._handle_action(
-            action=Sleep(device=self._active_device()),
+            action=Sleep(device=self._active_device(), device_lock=self._device_lock),
             callback_fnc=callback_fnc
         )
 
     def wake_up(self, callback_fnc=None) -> CommandExecution:
         return self._handle_action(
-            action=WakeUp(device=self._active_device()),
+            action=WakeUp(device=self._active_device(), device_lock=self._device_lock),
             callback_fnc=callback_fnc
         )
 
     def start_fan_cleaning(self, callback_fnc=None) -> CommandExecution:
         return self._handle_action(
-            action=StartFanCleaning(device=self._active_device()),
+            action=StartFanCleaning(device=self._active_device(), device_lock=self._device_lock),
             callback_fnc=callback_fnc
         )
 
     def get_auto_cleaning_interval(self, callback_fnc=None) -> CommandExecution:
         return self._handle_action(
-            action=ReadAutoCleaningInterval(device=self._active_device()),
+            action=ReadAutoCleaningInterval(device=self._active_device(), device_lock=self._device_lock),
             callback_fnc=callback_fnc
         )
 
     def set_auto_cleaning_interval(self, interval_s: int, callback_fnc=None) -> CommandExecution:
         return self._handle_action(
-            action=WriteAutoCleaningInterval(device=self._active_device(), ac_interval_s=interval_s),
+            action=WriteAutoCleaningInterval(device=self._active_device(), ac_interval_s=interval_s,
+                                             device_lock=self._device_lock),
             callback_fnc=callback_fnc
         )
 
     def get_product_type(self, callback_fnc=None) -> CommandExecution:
         return self._handle_action(
-            action=DeviceInformationProductType(device=self._active_device()),
+            action=DeviceInformationProductType(device=self._active_device(), device_lock=self._device_lock),
             callback_fnc=callback_fnc
         )
 
     def get_serial_number(self, callback_fnc=None) -> CommandExecution:
         return self._handle_action(
-            action=DeviceInformationSerialNumber(device=self._active_device()),
+            action=DeviceInformationSerialNumber(device=self._active_device(), device_lock=self._device_lock),
             callback_fnc=callback_fnc
         )
 
     def get_version(self, callback_fnc=None) -> CommandExecution:
         return self._handle_action(
-            action=ReadVersion(device=self._active_device()),
+            action=ReadVersion(device=self._active_device(), device_lock=self._device_lock),
             callback_fnc=callback_fnc
         )
 
     def get_status(self, callback_fnc=None) -> CommandExecution:
         return self._handle_action(
-            action=ReadDeviceStatusRegister(device=self._active_device()),
+            action=ReadDeviceStatusRegister(device=self._active_device(), device_lock=self._device_lock),
             callback_fnc=callback_fnc
         )
 
     def reset(self, callback_fnc=None) -> CommandExecution:
         return self._handle_action(
-            action=DeviceReset(device=self._active_device()),
+            action=DeviceReset(device=self._active_device(), device_lock=self._device_lock),
             callback_fnc=callback_fnc
         )
 
 
-class ParticulateMatterMeter:
+class _ContinuousMeasurement(Thread):
 
-    class InternalState(Enum):
-        IDLE = 0,
-        SLEEP = -1,
-        MEASUREMENT = 1
+    def __init__(self, the_sensor, results: deque, exit_event: Event, measurements_count: int, duration: timedelta):
+        Thread.__init__(self, name="Continuous Measurement")
+        self._the_sensor = the_sensor
+        self._results = results
+        self._exit_event = exit_event
+        self._measurements_count = measurements_count
+        self._duration = duration
+
+    def run(self):
+        _start = datetime.now()
+        while not self._exit_event.is_set():
+            _measurement_start = datetime.now()
+            try:
+                self._results.append(self._the_sensor.measure())
+            except SHDLCError as _x:
+                self._results.append(_x)
+
+            self._measurements_count -= 1
+            if self._measurements_count <= 0 or (datetime.now() - _start) >= self._duration:
+                break
+
+            self._exit_event.wait(timeout=1-(datetime.now() - _measurement_start).total_seconds())
+
+    def interrupt(self):
+        self._exit_event.set()
+
+
+class ParticulateMatterMeter:
 
     def __init__(self, port="/dev/ttyAMA0"):
         self._sensor = SensirionSPS30(port=port)
-        # after power on, the sensor is in idle state
-        self._most_probable_internal_state = self.InternalState.IDLE
         self._versions: Versions = None
-        self._serial_number = None
+        self._serial_number: str = None
+        self._continuous_measurement_thread: _ContinuousMeasurement = None
 
     def __del__(self):
+        # if the continous measurement is up, stop it
+        if self._continuous_measurement_thread is not None and self._continuous_measurement_thread.is_alive():
+            self.interrupt_continuous_measurement()
+
         # try to put the sensor to sleep
         try:
             self.sleep()
@@ -873,7 +899,7 @@ class ParticulateMatterMeter:
             #  most likely the sensor is put into sleep mode, wake it up
             self._validate_command(CMD_WAKEUP)
             self._sensor.wake_up()
-            m = self._sensor.read_measured_values().get_miso().interpret_data()
+            m = self.measure()
         except NoNewMeasurement as _x:
             # check if the measurement is not started
             self._validate_command(CMD_START)
@@ -885,18 +911,43 @@ class ParticulateMatterMeter:
             m = self._sensor.read_measured_values().get_miso().interpret_data()
         return m
 
-    class _ContinuousMeasurement(Thread):
+    def continuous_measurement(self, results: deque, exit_event: Event = None, max_measurements=0, duration=0):
+        if self._continuous_measurement_thread is not None and self._continuous_measurement_thread.is_alive():
+            raise ValueError(f"The continuous measurement is already running at the moment")
+        if results is None:
+            raise ValueError(f"The measurement cannot be start without having object receiving results")
+        if exit_event is None:
+            exit_event = Event()
+        if max_measurements is None or max_measurements <= 0:
+            max_measurements = 2 ** 31 - 2
+        if duration is None:
+            duration = 0
+        if isinstance(duration, int):
+            if duration <= 0:
+                duration = timedelta(seconds=max_measurements+1)
+            else:
+                duration = timedelta(seconds=duration)
+        if not isinstance(duration, timedelta):
+            raise ValueError(f"The duration is expected to be either number of seconds or timedelta object, "
+                             f"got `{duration}`")
 
-        def __init__(self, results: deque, exit_event: Event):
-            Thread.__init__(self)
-            self._results = results
-            self._exit_event = exit_event
+        self._continuous_measurement_thread = _ContinuousMeasurement(
+            the_sensor=self,
+            results=results,
+            exit_event=exit_event,
+            measurements_count=max_measurements,
+            duration=duration
+        )
 
-        def run(self):
-            pass
+        self._continuous_measurement_thread.start()
 
-    def continuous_measurement(self, results: deque, exit_event: Event):
-        pass
+    def interrupt_continuous_measurement(self):
+        if self._continuous_measurement_thread is None:
+            raise ValueError(f"The continuous measurement can not be interrupted as it was not started")
+
+        if self._continuous_measurement_thread.is_alive():
+            self._continuous_measurement_thread.interrupt()
+            self._continuous_measurement_thread.join()
 
 
 if __name__ == "__main__":
