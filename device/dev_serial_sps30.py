@@ -151,7 +151,8 @@ Measurement = namedtuple('Measurement', [
     'number_concentration_pm_2_5_per_cm3',
     'number_concentration_pm_4_0_per_cm3',
     'number_concentration_pm_10_per_cm3',
-    'typical_particle_size_um'
+    'typical_particle_size_um',
+    'timestamp'
 ])
 
 AutoCleanInterval = namedtuple('AutoCleanInterval', ['interval_s'])
@@ -226,6 +227,7 @@ class MISOFrame:
 
     def __init__(self, bytes_received: bytes):
         self.raw_frame_bytes = bytes_received
+        self.timestamp = datetime.now()
 
         if self.raw_frame_bytes is None or len(self.raw_frame_bytes) == 0:
             raise NoDataInResponse()
@@ -322,7 +324,8 @@ class MISOFrame:
                 number_concentration_pm_2_5_per_cm3=int.from_bytes(self.data[12:14], byteorder="big"),
                 number_concentration_pm_4_0_per_cm3=int.from_bytes(self.data[14:16], byteorder="big"),
                 number_concentration_pm_10_per_cm3=int.from_bytes(self.data[16:18], byteorder="big"),
-                typical_particle_size_um=int.from_bytes(self.data[18:], byteorder="big")
+                typical_particle_size_um=int.from_bytes(self.data[18:], byteorder="big"),
+                timestamp=self.timestamp,
             )
         if self.command == CMD_SLEEP:
             return {}
