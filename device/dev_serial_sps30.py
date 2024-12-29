@@ -5,7 +5,6 @@
 import serial
 
 from collections import namedtuple, deque
-from enum import Enum
 from functools import reduce
 from threading import Thread, Event, Lock
 from datetime import datetime, timedelta
@@ -64,7 +63,7 @@ class NoDataInResponse(ResponseFrameError):
             self,
             f"No data received from the sensor. Maybe it is put to sleep? "
             f"This may also be caused by not connected or wrongly connected hardware. "
-            f"Check if TX\\RX are cross-connected (i.e. TX of RPi goes to RX in sensor)",
+            f"Check if TX\\RX are cross-connected (i.e. TX of RPi goes to RX of the sensor)",
             bytes()
         )
 
@@ -137,10 +136,6 @@ class ResponseCorrupted(ResponseFrameError):
         ResponseFrameError.__init__(self, msg, data)
 
 
-def str_bytes(content: bytes):
-    return "|".join([f"0x{_b:02X}" for _b in content])
-
-
 Measurement = namedtuple('Measurement', [
     'mass_concentration_pm_1_0_ug_m3',
     'mass_concentration_pm_2_5_ug_m3',
@@ -163,20 +158,48 @@ Versions = namedtuple('Version', ['firmware', 'hardware', 'protocol'])
 
 DeviceStatus = namedtuple('DeviceStatus', ['speed_warning', 'laser_error', 'fan_error', 'register'])
 
+BYTES_STUFFING_START_BYTE = 0x7D
+BYTES_STUFFING_MAP = {
+    0x7E: [BYTES_STUFFING_START_BYTE, 0x5E],
+    0x7D: [BYTES_STUFFING_START_BYTE, 0x5D],
+    0x11: [BYTES_STUFFING_START_BYTE, 0x31],
+    0x13: [BYTES_STUFFING_START_BYTE, 0x33],
+}
+BYTES_UNSTUFFING_MAP = {
+    BYTES_STUFFING_MAP[ori_byte][1]: ori_byte
+    for ori_byte in BYTES_STUFFING_MAP
+}
+
+
+def stuffing(data: bytes) -> list:
+    return reduce(
+        lambda x, y: x + y,
+        [BYTES_STUFFING_MAP[b] if b in BYTES_STUFFING_MAP else [b] for b in data],
+        []
+    )
+
+
+def unstuffing(data: bytes) -> list:
+    return [
+        c if p != BYTES_STUFFING_START_BYTE else BYTES_UNSTUFFING_MAP[c]
+        for c, p in zip(list(data), [None]+list(data)[:-1])
+        if c != BYTES_STUFFING_START_BYTE
+    ]
+
+
+def checksum(data) -> int:
+    return 0xFF - (sum(data) % 0x100)
+
+
+def str_bytes(content: bytes):
+    return "|".join([f"0x{_b:02X}" for _b in content])
+
 
 class MOSIFrame:
     """
     Implements Master Out Slave In frame, part of SHDLC protocol.
     It represents the command sent from master (RPi) to the SPS30 sensor.
     """
-
-    BYTES_DISEMBOWELLING_START = 0x7D
-    BYTES_STUFFING = {
-        0x7E: [BYTES_DISEMBOWELLING_START, 0x5E],
-        0x7D: [BYTES_DISEMBOWELLING_START, 0x5D],
-        0x11: [BYTES_DISEMBOWELLING_START, 0x31],
-        0x13: [BYTES_DISEMBOWELLING_START, 0x33],
-    }
 
     def __init__(self, command: Command, data: bytes):
         if len(data) > 255:
@@ -185,11 +208,6 @@ class MOSIFrame:
         self.command = command
         self.original_data = data
 
-    def _byte_stuffing(self, _byte: int) -> list:
-        if _byte in self.BYTES_STUFFING:
-            return self.BYTES_STUFFING[_byte]
-        return [_byte]
-
     def get_command(self) -> int:
         return self.command.code
 
@@ -197,16 +215,16 @@ class MOSIFrame:
         return len(self.original_data)
 
     def get_checksum(self) -> int:
-        return 0xFF - (sum([FRAME_SLAVE_ADR, self.get_command(), self.get_data_len()]+list(self.original_data)) % 0x100)
+        return checksum([FRAME_SLAVE_ADR, self.get_command(), self.get_data_len()]+list(self.original_data))
 
     def get_frame(self) -> bytes:
         return bytes(
             [FRAME_START,
              FRAME_SLAVE_ADR,
              self.get_command()
-             ] + self._byte_stuffing(self.get_data_len()) +
-            reduce(lambda x, y: x + y, [self._byte_stuffing(b) for b in self.original_data], []) +
-            self._byte_stuffing(self.get_checksum()) +
+             ] + stuffing(bytes([self.get_data_len()])) +
+            stuffing(self.original_data) +
+            stuffing(bytes([self.get_checksum()])) +
             [FRAME_STOP]
         )
 
@@ -219,11 +237,6 @@ class MISOFrame:
     Implements Master In Slave Out frame, part of SHDLC protocol.
     It is a data frame that is sent as response from SPS30 sensor (slave) to Raspberry Pi (master)
     """
-
-    BYTES_DISEMBOWELLING = {
-        MOSIFrame.BYTES_STUFFING[ori_byte][1]: ori_byte
-        for ori_byte in MOSIFrame.BYTES_STUFFING
-    }
 
     def __init__(self, bytes_received: bytes):
         self.raw_frame_bytes = bytes_received
@@ -244,21 +257,16 @@ class MISOFrame:
             raise ResponseFrameError(f'The last byte is not a stop-byte, expected 0x{FRAME_STOP:X}, '
                                      f'actual 0x{self.raw_frame_bytes[-1]:X}', self.raw_frame_bytes)
 
-        self.frame_bytes = [self.raw_frame_bytes[0]]
-        _i = 1
-        while _i < len(self.raw_frame_bytes) - 1:
-            if self.raw_frame_bytes[_i] == MOSIFrame.BYTES_DISEMBOWELLING_START:
-                if self.raw_frame_bytes[_i+1] in self.BYTES_DISEMBOWELLING:
-                    self.frame_bytes.append(self.BYTES_DISEMBOWELLING[self.raw_frame_bytes[_i+1]])
-                else:
-                    raise ResponseFrameError(f"Incorrect byte-stuffing found: "
-                                             f"{str_bytes(self.raw_frame_bytes[_i:_i+2])}",
-                                             self.raw_frame_bytes)
-                _i += 2
-            else:
-                self.frame_bytes.append(self.raw_frame_bytes[_i])
-                _i += 1
-        self.frame_bytes.append(self.raw_frame_bytes[_i])
+        try:
+            self.frame_bytes = bytes(
+                [self.raw_frame_bytes[0]] +
+                unstuffing(self.raw_frame_bytes[1:-1]) +
+                [self.raw_frame_bytes[-1]]
+            )
+        except KeyError:
+            raise ResponseFrameError(f"Incorrect byte-stuffing found: "
+                                     f"{str_bytes(self.raw_frame_bytes[1:-1])}",
+                                     self.raw_frame_bytes)
 
         self.command = {cmd.code: cmd for cmd in COMMANDS}.get(self.frame_bytes[2])
         if self.command is None:
@@ -289,14 +297,11 @@ class MISOFrame:
         self.data = bytes(self.frame_bytes[5:5+_data_length])
 
         _chk = self.frame_bytes[-2]
-        _act_chk = 0xFF - (sum(self.frame_bytes[1:-2]) % 0x100)
+        _act_chk = checksum(self.frame_bytes[1:-2])
         if _chk != _act_chk:
             raise ResponseFrameError(f"Wrong checksum detected. "
                                      f"Expected 0x{_act_chk:X}, received: 0x{_chk:X}",
                                      self.raw_frame_bytes)
-        
-        # just to have consistent typing
-        self.frame_bytes = bytes(self.frame_bytes)
 
     def __repr__(self):
         return str_bytes(self.raw_frame_bytes)
