@@ -56,6 +56,67 @@ class BytesStuffingTests(TestCase):
                       f"Expected data: {str_bytes(data)}\n"
                       f"Actual data: {str_bytes(processed)}")
 
+
+
+class SimulatedResponseFrame:
+
+    def __init__(self, command: Command = None, data: bytes = None, state: int = None):
+        if command is None:
+            command = random.choice(COMMANDS)
+        if state is None:
+            state = 0
+
+
+        self.command = command
+        self.data = data
+        self.state = state
+
+    def get_frame_bytes(self) -> bytes:
+        _frame_content = [FRAME_SLAVE_ADR, self.command.code, self.state] + \
+                         stuffing(bytes([len(self.data)])) + stuffing(self.data)
+
+        return bytes(
+            [FRAME_START] +
+            _frame_content +
+            stuffing(bytes([checksum(_frame_content)])) +
+            [FRAME_STOP]
+        )
+
+
+
+class FrameTests(TestCase):
+
+    def _random_data(self, size=-1) -> bytes:
+        if size == 0:
+            return bytes([])
+        if size < 0:
+            size = random.randint(1, 255)
+        return bytes([random.randint(0, 255) for _ in range(size)])
+
+    def test_01_MOSI(self):
+        # too long data
+        self.assertRaises(ValueError, MOSIFrame, random.choice(COMMANDS), self._random_data(256))
+        self.assertRaises(ValueError, MOSIFrame, random.choice(COMMANDS), self._random_data(random.randint(257, 356)))
+        # random data
+        test_data = self._random_data()
+        test_cmd = random.choice(COMMANDS)
+        frame = MOSIFrame(command=test_cmd, data=test_data)
+        self.assertEqual(len(test_data), frame.get_data_len(),
+                         f"The data lengt measured by the MOSI frame is incorrect")
+        self.assertEqual(test_cmd.code, frame.get_command(), f"The frame returned wrong command-code")
+        frame_data = frame.get_frame()
+        self.assertEqual(FRAME_START, frame_data[0], f"The frame data does not start with the required start-byte")
+        self.assertEqual(FRAME_STOP, frame_data[-1], f"The frame data does not end with the required stop-byte")
+        self.assertEqual(FRAME_SLAVE_ADR, frame_data[1], f"The frame data does not provide correct slave address byte")
+        self.assertEqual(test_cmd.code, frame_data[2], f"The frame data does not provide correct command code")
+        # data, len and checksum in the frame content are not tested
+        # smoke test of _str_bytes
+        print(repr(frame))
+
+    def test_02_MISO_reaction_on_wrong_data(self):
+        pass
+
+
 # ----------------------------------------------------------------------------------------------------------------------
 
 
