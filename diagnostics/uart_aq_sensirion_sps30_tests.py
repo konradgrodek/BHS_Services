@@ -57,15 +57,64 @@ class BytesStuffingTests(TestCase):
                       f"Actual data: {str_bytes(processed)}")
 
 
+class RandomMeasurement(Measurement):
+    CONCENTRATION = list(range(0, 65535))
+    WEIGHTS = [1 / (3 * c) if c > 0 else 1 / 5 for c in CONCENTRATION]
+
+    def __init__(self):
+        _mass, _number, _size = random.choices(self.CONCENTRATION, weights=self.WEIGHTS, k=2)
+        def _generate_next(x): return min(65535, max(0, x + random.randint(-x // 10, x // 10)))
+
+        self.mass_concentration_pm_1_0_ug_m3 = _mass
+        self.mass_concentration_pm_2_5_ug_m3 = _generate_next(_mass)
+        self.mass_concentration_pm_4_0_ug_m3 = _generate_next(_mass)
+        self.mass_concentration_pm_10_ug_m3 = _generate_next(_mass)
+
+        self.number_concentration_pm_0_5_per_cm3 = _number
+        self.number_concentration_pm_1_0_per_cm3 = _generate_next(_number)
+        self.number_concentration_pm_2_5_per_cm3 = _generate_next(_number)
+        self.number_concentration_pm_4_0_per_cm3 = _generate_next(_number)
+        self.number_concentration_pm_10_per_cm3 = _generate_next(_number)
+
+        self.typical_particle_size_um = _size
+
+    def to_bytes(self) -> bytes:
+        def _to_bytes(x: int): return x.to_bytes(2, byteorder='big')
+        return _to_bytes(self.mass_concentration_pm_1_0_ug_m3) + \
+            _to_bytes(self.mass_concentration_pm_2_5_ug_m3) + \
+            _to_bytes(self.mass_concentration_pm_4_0_ug_m3) + \
+            _to_bytes(self.mass_concentration_pm_10_ug_m3) + \
+            _to_bytes(self.number_concentration_pm_0_5_per_cm3) + \
+            _to_bytes(self.number_concentration_pm_1_0_per_cm3) + \
+            _to_bytes(self.number_concentration_pm_2_5_per_cm3) + \
+            _to_bytes(self.number_concentration_pm_4_0_per_cm3) + \
+            _to_bytes(self.number_concentration_pm_10_per_cm3) + \
+            _to_bytes(self.typical_particle_size_um)
+
 
 class SimulatedResponseFrame:
 
-    def __init__(self, command: Command = None, data: bytes = None, state: int = None):
+    def __init__(self, command: Command = None, data: bytes = None, state: int = 0):
         if command is None:
             command = random.choice(COMMANDS)
         if state is None:
             state = 0
-
+        if data is None:
+            # generate fake data
+            if command in (CMD_START, CMD_STOP, CMD_SLEEP, CMD_WAKEUP, CMD_CLEAN, CMD_RESET):
+                data = bytes([])
+            if command == CMD_MEASURE:
+                data = RandomMeasurement().to_bytes()
+            if command == CMD_INFO:
+                data = reduce(lambda x, y: x + y, random.choices('ABCDEFGH0123456789', k=16)).encode('ascii')
+            if command == CMD_VERSION:
+                data = reduce(
+                    lambda x, y: x + y, [random.randint(0, 255).to_bytes(1, byteorder='big') for _ in range(7)])
+            if command == CMD_STATUS:
+                data = sum([random.randint(0, 1)*2**bit for bit in range(32)]).to_bytes(4, byteorder='big') + bytes([0])
+            if command == CMD_SET_AUTO_CLEAN:
+                # FIXME how to distinguish SET from GET?
+                data = bytes([])
 
         self.command = command
         self.data = data
@@ -81,7 +130,6 @@ class SimulatedResponseFrame:
             stuffing(bytes([checksum(_frame_content)])) +
             [FRAME_STOP]
         )
-
 
 
 class FrameTests(TestCase):
@@ -114,7 +162,16 @@ class FrameTests(TestCase):
         print(repr(frame))
 
     def test_02_MISO_reaction_on_wrong_data(self):
-        pass
+        self.assertRaises(NoDataInResponse, MISOFrame, None)
+        self.assertRaises(NoDataInResponse, MISOFrame, bytes([]))
+        for attempt in range(1, 7):
+            self.assertRaises(ResponseFrameError, MISOFrame, self._random_data(attempt))
+        valid_frame_bytes = SimulatedResponseFrame().get_frame_bytes()
+        self.assertRaises(ResponseFrameError, MISOFrame, bytes([0])+valid_frame_bytes[1:])
+        self.assertRaises(ResponseFrameError, MISOFrame, valid_frame_bytes[0:1]+bytes([0xFF])+valid_frame_bytes[3:])
+        self.assertRaises(ResponseFrameError, MISOFrame, valid_frame_bytes[:-1]+bytes([0]))
+
+
 
 
 # ----------------------------------------------------------------------------------------------------------------------
