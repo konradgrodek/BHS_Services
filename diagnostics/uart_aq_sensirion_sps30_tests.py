@@ -122,7 +122,8 @@ class RandomDeviceInfo(RandomData):
         self.device_info = DeviceInfo(info=reduce(lambda x, y: x + y, random.choices('ABCDEFGH0123456789', k=16)))
 
     def to_bytes(self) -> bytes:
-        return self.device_info.info.encode('ascii')
+        # null-terminated ascii string
+        return self.device_info.info.encode('ascii')+bytes([0])
 
     def data(self) -> namedtuple:
         return self.device_info
@@ -133,7 +134,7 @@ class RandomVersions(RandomData):
     def __init__(self):
         self.versions = Versions(
             firmware=(random.randint(0, 255), random.randint(0, 255)),
-            hardware= random.randint(0, 255),
+            hardware=random.randint(0, 255),
             protocol=(random.randint(0, 255), random.randint(0, 255))
         )
 
@@ -141,7 +142,9 @@ class RandomVersions(RandomData):
         return bytes([
             self.versions.firmware[0],
             self.versions.firmware[1],
+            0,
             self.versions.hardware,
+            0,
             self.versions.protocol[0],
             self.versions.protocol[1]
         ])
@@ -163,7 +166,7 @@ class RandomDeviceStatus(RandomData):
         )
 
     def to_bytes(self) -> bytes:
-        return int(self.device_status.register, base=2).to_bytes(4, byteorder='big')
+        return int(self.device_status.register, base=2).to_bytes(4, byteorder='big')+bytes([0])
 
     def data(self) -> namedtuple:
         return self.device_status
@@ -198,13 +201,16 @@ class SimulatedResponseFrame:
         self.state = state
 
     def get_frame_bytes(self) -> bytes:
-        _frame_content = [FRAME_SLAVE_ADR, self.command.code, self.state] + \
-                         stuffing(bytes([len(self.data_bytes)])) + stuffing(self.data_bytes)
+        _not_stuffed_frame_content = bytes([FRAME_SLAVE_ADR, self.command.code, self.state, len(self.data_bytes)]) + \
+                                     self.data_bytes
+
+        _stuffed_frame_content = [FRAME_SLAVE_ADR, self.command.code, self.state] + \
+                                 stuffing(bytes([len(self.data_bytes)])) + stuffing(self.data_bytes)
 
         return bytes(
             [FRAME_START] +
-            _frame_content +
-            stuffing(bytes([checksum(_frame_content)])) +
+            _stuffed_frame_content +
+            stuffing(bytes([checksum(_not_stuffed_frame_content)])) +
             [FRAME_STOP]
         )
 
@@ -221,6 +227,48 @@ class FrameTests(TestCase):
         if size < 0:
             size = random.randint(1, 255)
         return bytes([random.randint(0, 255) for _ in range(size)])
+
+    def assertMeasurementEqual(self, expected: Measurement, actual: Measurement):
+        self.assertEqual(expected.mass_concentration_pm_1_0_ug_m3, actual.mass_concentration_pm_1_0_ug_m3,
+                         f"Measurement differs on mass-concentration-1-0")
+        self.assertEqual(expected.mass_concentration_pm_2_5_ug_m3, actual.mass_concentration_pm_2_5_ug_m3,
+                         f"Measurement differs on mass-concentration-2-5")
+        self.assertEqual(expected.mass_concentration_pm_4_0_ug_m3, actual.mass_concentration_pm_4_0_ug_m3,
+                         f"Measurement differs on mass-concentration-4-0")
+        self.assertEqual(expected.mass_concentration_pm_10_ug_m3, actual.mass_concentration_pm_10_ug_m3,
+                         f"Measurement differs on mass-concentration-10")
+        self.assertEqual(expected.number_concentration_pm_0_5_per_cm3, actual.number_concentration_pm_0_5_per_cm3,
+                         f"Measurement differs on number-concentration-0-5")
+        self.assertEqual(expected.number_concentration_pm_1_0_per_cm3, actual.number_concentration_pm_1_0_per_cm3,
+                         f"Measurement differs on number-concentration-1-0")
+        self.assertEqual(expected.number_concentration_pm_2_5_per_cm3, actual.number_concentration_pm_2_5_per_cm3,
+                         f"Measurement differs on number-concentration-2-5")
+        self.assertEqual(expected.number_concentration_pm_4_0_per_cm3, actual.number_concentration_pm_4_0_per_cm3,
+                         f"Measurement differs on number-concentration-4-0")
+        self.assertEqual(expected.number_concentration_pm_10_per_cm3, actual.number_concentration_pm_10_per_cm3,
+                         f"Measurement differs on number-concentration-10")
+        self.assertEqual(expected.typical_particle_size_um, actual.typical_particle_size_um,
+                         f"Measurement differs on typical-particle-size")
+        self.assertIsNotNone(actual.timestamp, f"The timestamp may not be left empty")
+        # NOTE: the actual values of the timestamp are not compared deliberately:
+        # this is additional field, not being part of the communication protocol
+
+    def assertAutoCleanIntervalEqual(self, expected: AutoCleanInterval, actual: AutoCleanInterval):
+        self.assertEqual(expected.interval_s, actual.interval_s, f"Ato-clean-interval differs")
+
+    def assertDeviceInfoEqual(self, expected: DeviceInfo, actual: DeviceInfo):
+        self.assertEqual(expected.info, actual.info, f"Device-info differs")
+
+    def assertVersionsEqual(self, expected: Versions, actual: Versions):
+        self.assertTupleEqual(expected.firmware, actual.firmware, f"Version differs on firmware")
+        self.assertEqual(expected.hardware, actual.hardware, f"Version differs on hardware")
+        self.assertTupleEqual(expected.protocol, actual.protocol, f"Version differs on protocol")
+
+    def assertDeviceStatusEqual(self, expected: DeviceStatus, actual: DeviceStatus):
+        self.assertEqual(expected.speed_warning, actual.speed_warning, f"Device-status differs on speed-warning")
+        self.assertEqual(expected.laser_error, actual.laser_error, f"Device-status differs on laser-error")
+        self.assertEqual(expected.fan_error, actual.fan_error, f"Device-status differs on fan-error")
+        self.assertEqual(expected.speed_warning, actual.speed_warning, f"Device-status differs on speed-warning")
 
     def test_01_MOSI(self):
         # too long data
@@ -246,8 +294,24 @@ class FrameTests(TestCase):
         for command in list(COMMANDS) + [CMD_INFO, CMD_VERSION, CMD_MEASURE, CMD_STATUS] * 100:
             simulated_frame = SimulatedResponseFrame(command=command)
             the_frame = MISOFrame(simulated_frame.get_frame_bytes())
-            self.assertEqual(simulated_frame.command, the_frame.command)
-            # here add tests on data content (byte-wise) and the content (comparing namedtuples)
+            self.assertEqual(simulated_frame.command, the_frame.command,
+                             "The command returned by frame is different than the one used to create the frame")
+            self.assertEqual(simulated_frame.data_bytes, the_frame.data,
+                             f"The data bytes returned by frame are different than the bytes used to create it")
+
+            if simulated_frame.data_structure:
+                if isinstance(simulated_frame.data_structure, Measurement):
+                    self.assertMeasurementEqual(simulated_frame.data_structure, the_frame.interpret_data())
+                elif isinstance(simulated_frame.data_structure, AutoCleanInterval):
+                    self.assertAutoCleanIntervalEqual(simulated_frame.data_structure, the_frame.interpret_data())
+                elif isinstance(simulated_frame.data_structure, DeviceInfo):
+                    self.assertDeviceInfoEqual(simulated_frame.data_structure, the_frame.interpret_data())
+                elif isinstance(simulated_frame.data_structure, Versions):
+                    self.assertVersionsEqual(simulated_frame.data_structure, the_frame.interpret_data())
+                elif isinstance(simulated_frame.data_structure, DeviceStatus):
+                    self.assertDeviceStatusEqual(simulated_frame.data_structure, the_frame.interpret_data())
+                else:
+                    self.fail(f"Unsupported structure: {type(simulated_frame.data_structure)}")
 
     def test_03_MISO_reaction_on_wrong_data(self):
         self.assertRaises(NoDataInResponse, MISOFrame, None)
@@ -288,12 +352,15 @@ class FrameTests(TestCase):
                           f"ResponseFrameError, whilst no exception was reported.\n"
                           f"V: {str_bytes(valid_frame_bytes)}\n"
                           f"I: {str_bytes(invalid_frame_bytes)}")
-            except ResponseFrameError as e:
+            except ResponseFrameError:
                 # expected
                 pass
+            except AssertionError as e:
+                # if failed...
+                raise e
             except Exception as different_exception:
                 self.fail(f"It was expected that introducing random disturbance in checksum will result in "
-                          f"ResponseFrameError, whereas {type(different_exception)} was reported.\n"
+                          f"ResponseFrameError, whereas {different_exception} was reported.\n"
                           f"V: {str_bytes(valid_frame_bytes)}\n"
                           f"I: {str_bytes(invalid_frame_bytes)}")
 

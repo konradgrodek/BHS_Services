@@ -324,7 +324,7 @@ class MISOFrame:
                 mass_concentration_pm_2_5_ug_m3=int.from_bytes(self.data[2:4], byteorder="big"),
                 mass_concentration_pm_4_0_ug_m3=int.from_bytes(self.data[4:6], byteorder="big"),
                 mass_concentration_pm_10_ug_m3=int.from_bytes(self.data[6:8], byteorder="big"),
-                number_concentration_pm_0_5_per_cm3=int.from_bytes(self.data[9:10], byteorder="big"),
+                number_concentration_pm_0_5_per_cm3=int.from_bytes(self.data[8:10], byteorder="big"),
                 number_concentration_pm_1_0_per_cm3=int.from_bytes(self.data[10:12], byteorder="big"),
                 number_concentration_pm_2_5_per_cm3=int.from_bytes(self.data[12:14], byteorder="big"),
                 number_concentration_pm_4_0_per_cm3=int.from_bytes(self.data[14:16], byteorder="big"),
@@ -374,7 +374,7 @@ class MISOFrame:
                 raise ResponseCorrupted(f"It is expected that executing 0x{self.command.code:02X} {self.command.name} "
                                         f"will provide 5-bytes length response whereas {len(self.data)} bytes was found",
                                         self.data)
-            register = int.from_bytes(self.data[0:5], byteorder="big")
+            register = int.from_bytes(self.data[0:4], byteorder="big")
             return DeviceStatus(
                 speed_warning=(register & (2 ** 21)) > 0,
                 laser_error=(register & (2 ** 5)) > 0,
