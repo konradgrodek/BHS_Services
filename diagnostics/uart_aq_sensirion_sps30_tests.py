@@ -364,8 +364,6 @@ class FrameTests(TestCase):
                           f"V: {str_bytes(valid_frame_bytes)}\n"
                           f"I: {str_bytes(invalid_frame_bytes)}")
 
-
-
 # ----------------------------------------------------------------------------------------------------------------------
 
 
@@ -387,14 +385,21 @@ class SensirionDeviceSimulator:
     It provides the same API as used by the driver to get data from serial port
     """
 
-    def __init__(self):
+    def __init__(self, firmware_version=(2, 3)):
         self.port = "/dev/null"
         self.is_open = False
         self.internal_state = _DeviceSimulatorInternalState.IDLE
         self.malfunction = Malfunction.NONE
         self.timeout = SensirionSPS30.READ_TIMEOUT_MS / 1000
         self.write_timeout = SensirionSPS30.WRITE_TIMEOUT_MS / 1000
+        self.current_command: Command = None
         self.response_to_last_command = bytes()
+        self.firmware_version = firmware_version
+        # self.protocol_version =
+        # self.hardware_revision = 7
+        self.auto_clean_interval = 604800
+        self.product_type_bytes = "00080000".encode("ASCII") + bytes([0])
+        self.serial_number_bytes: RandomDeviceInfo().to_bytes()
 
     def open(self):
         self.is_open = True
@@ -415,5 +420,106 @@ class SensirionDeviceSimulator:
             raise serial.SerialTimeoutException(f"Simulated timeout after {self.timeout:.2f} seconds")
         return self.response_to_last_command
 
+    # FIXME use rather SimulatedFrame
+    def response_with_no_data(self, error_code: int = 0, command_code: int = -1) -> bytes:
+        state = 2**7+error_code if error_code > 0 else 0
+        return bytes([
+            FRAME_START,
+            FRAME_SLAVE_ADR,
+            self.current_command.code if command_code < 0 else command_code,
+            stuffing(bytes([state])),
+            0,  # data-len
+            stuffing(bytes([checksum(bytes([self.current_command.code, state]))])),
+            FRAME_STOP
+        ])
+
     def prepare_response(self, frame: bytes) -> bytes:
-        pass
+        if frame[0] != FRAME_START or frame[-1] != FRAME_STOP or frame[1] != FRAME_SLAVE_ADR:
+            return bytes([])  # TODO check what would be the response
+
+        frame_content = unstuffing(frame[1:-1])
+
+        expected_chksum = checksum(frame_content[:-1])
+        if expected_chksum != frame_content[-1]:
+            return bytes([])  # TODO check what would be the response
+
+        self.current_command = {cmd.code: cmd for cmd in COMMANDS}.get(frame_content[1])
+        if self.current_command is None or self.current_command.min_version < self.firmware_version:
+            return self.response_with_no_data(command_code=frame_content[1], error_code=0x02)
+
+        data_len = frame_content[2]
+        data = frame_content[3:3+data_len]
+
+        if self.current_command == CMD_START:
+            if data_len != 2:
+                return self.response_with_no_data(error_code=0x01)
+            if data[0] != 0x01 or data[1] not in (0x03, 0x05):
+                return self.response_with_no_data(error_code=0x04)
+            return self.response_with_no_data()
+        if self.current_command == CMD_STOP:
+            if data_len != 0:
+                return self.response_with_no_data(error_code=0x01)
+            return self.response_with_no_data()
+        if self.current_command == CMD_MEASURE:
+            if data_len != 0:
+                return self.response_with_no_data(error_code=0x01)
+            return SimulatedResponseFrame(self.current_command).get_frame_bytes()
+        if self.current_command == CMD_SLEEP:
+            if data_len != 0:
+                return self.response_with_no_data(error_code=0x01)
+            return self.response_with_no_data()
+        if self.current_command == CMD_WAKEUP:
+            if data_len != 0:
+                return self.response_with_no_data(error_code=0x01)
+            return self.response_with_no_data()
+        if self.current_command == CMD_CLEAN:
+            if data_len != 0:
+                return self.response_with_no_data(error_code=0x01)
+            return self.response_with_no_data()
+        if self.current_command == CMD_SET_AUTO_CLEAN:
+            if data_len == 1:
+                # read auto-clean-interval
+                if data[0] != 0x00:
+                    return self.response_with_no_data(error_code=0x04)
+                return SimulatedResponseFrame(self.current_command, data=self.auto_clean_interval.to_bytes(4, byteorder="big")).get_frame_bytes()
+            elif data_len == 5:
+                # write auto-clean-interval
+                if data[0] != 0x00:
+                    return self.response_with_no_data(error_code=0x04)
+                self.auto_clean_interval = int.from_bytes(data[1:], byteorder="big")
+                if self.auto_clean_interval < 0:
+                    return self.response_with_no_data(error_code=0x04)
+                return self.response_with_no_data()
+            else:
+                return self.response_with_no_data(error_code=0x01)
+        if self.current_command == CMD_INFO:
+            if data_len != 1:
+                return self.response_with_no_data(error_code=0x01)
+            if data[0] == 0x00:
+                # product type
+                return SimulatedResponseFrame(self.current_command, data=self.product_type_bytes).get_frame_bytes()
+            elif data[0] == 0x03:
+                # serial number
+                return SimulatedResponseFrame(self.current_command, data=self.serial_number_bytes).get_frame_bytes()
+            else:
+                return self.response_with_no_data(error_code=0x04)
+        if self.current_command == CMD_VERSION:
+            pass
+        if self.current_command == CMD_STATUS:
+            pass
+        if self.current_command == CMD_RESET:
+            if data_len != 0:
+                return self.response_with_no_data(error_code=0x01)
+            return self.response_with_no_data()
+
+        # if reached here, it means that one of the commands was omitted
+        return self.response_with_no_data(command_code=frame_content[1], error_code=0x02)
+
+# NEXT:
+# 1. consider using SimulatedResponseFrame everywhere
+# 2. implement internal state, make sure the responses are consistent
+# 3. in diagnostic tool add simulated error, test different scenarios
+
+
+
+
