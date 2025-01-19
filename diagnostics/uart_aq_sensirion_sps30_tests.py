@@ -57,7 +57,7 @@ class BytesStuffingTests(TestCase):
                       f"Actual data: {str_bytes(processed)}")
 
 
-class RandomData:
+class TestData:
 
     def to_bytes(self) -> bytes:
         raise NotImplementedError()
@@ -66,7 +66,16 @@ class RandomData:
         raise NotImplementedError()
 
 
-class RandomMeasurement(RandomData):
+class TestEmptyData(TestData):
+
+    def to_bytes(self) -> bytes:
+        return bytes([])
+
+    def data(self) -> namedtuple:
+        return {}
+
+
+class TestDataMeasurement(TestData):
     CONCENTRATION = list(range(0, 65535))
     WEIGHTS = [1 / (3 * c) if c > 0 else 1 / 5 for c in CONCENTRATION]
 
@@ -104,10 +113,12 @@ class RandomMeasurement(RandomData):
         return self.measurement
 
 
-class RandomAutoCleanInterval(RandomData):
+class TestDataAutoCleanInterval(TestData):
 
-    def __init__(self):
-        self.auto_clean_interval = AutoCleanInterval(interval_s=random.randint(60*60*24, 60*60*24*7))
+    def __init__(self, interval_s = -1):
+        self.auto_clean_interval = AutoCleanInterval(
+            interval_s=random.randint(60*60*24, 60*60*24*7) if interval_s < 0 else interval_s
+        )
 
     def to_bytes(self) -> bytes:
         return self.auto_clean_interval.interval_s.to_bytes(4, byteorder='big')
@@ -116,10 +127,13 @@ class RandomAutoCleanInterval(RandomData):
         return self.auto_clean_interval
 
 
-class RandomDeviceInfo(RandomData):
+class TestDataDeviceInfo(TestData):
 
-    def __init__(self):
-        self.device_info = DeviceInfo(info=reduce(lambda x, y: x + y, random.choices('ABCDEFGH0123456789', k=16)))
+    def __init__(self, device_info: str = None):
+        self.device_info = DeviceInfo(
+            info=reduce(lambda x, y: x + y, random.choices('ABCDEFGH0123456789', k=16))
+            if device_info is None else device_info
+        )
 
     def to_bytes(self) -> bytes:
         # null-terminated ascii string
@@ -129,13 +143,13 @@ class RandomDeviceInfo(RandomData):
         return self.device_info
 
 
-class RandomVersions(RandomData):
+class TestDataVersions(TestData):
 
-    def __init__(self):
+    def __init__(self, firmware=None, hardware=None, protocol=None):
         self.versions = Versions(
-            firmware=(random.randint(0, 255), random.randint(0, 255)),
-            hardware=random.randint(0, 255),
-            protocol=(random.randint(0, 255), random.randint(0, 255))
+            firmware=(random.randint(0, 255), random.randint(0, 255)) if firmware is None else firmware,
+            hardware=random.randint(0, 255) if hardware is None else hardware,
+            protocol=(random.randint(0, 255), random.randint(0, 255)) if protocol is None else protocol
         )
 
     def to_bytes(self) -> bytes:
@@ -153,10 +167,14 @@ class RandomVersions(RandomData):
         return self.versions
 
 
-class RandomDeviceStatus(RandomData):
+class TestDataDeviceStatus(TestData):
 
-    def __init__(self):
-        s, l, f = (random.randint(0, 1) for _ in range(3))
+    def __init__(self, speed_warning=-1, laser_error=-1, fan_error=-1):
+        s, l, f = (
+            random.randint(0, 1) if speed_warning < 0 else speed_warning,
+            random.randint(0, 1) if laser_error < 0 else laser_error,
+            random.randint(0, 1) if fan_error < 0 else fan_error,
+        )
 
         self.device_status = DeviceStatus(
             speed_warning=s,
@@ -174,7 +192,7 @@ class RandomDeviceStatus(RandomData):
 
 class SimulatedResponseFrame:
 
-    def __init__(self, command: Command = None, data=None, state: int = 0):
+    def __init__(self, command: Command = None, data: TestData = None, state: int = 0):
         if command is None:
             command = random.choice(COMMANDS)
         if state is None:
@@ -182,30 +200,29 @@ class SimulatedResponseFrame:
         if data is None:
             # generate fake data
             if command in (CMD_START, CMD_STOP, CMD_SLEEP, CMD_WAKEUP, CMD_CLEAN, CMD_RESET):
-                data = bytes([])
+                data = TestEmptyData()
             if command == CMD_MEASURE:
-                data = RandomMeasurement()
+                data = TestDataMeasurement()
             if command == CMD_INFO:
-                data = RandomDeviceInfo()
+                data = TestDataDeviceInfo()
             if command == CMD_VERSION:
-                data = RandomVersions()
+                data = TestDataVersions()
             if command == CMD_STATUS:
-                data = RandomDeviceStatus()
+                data = TestDataDeviceStatus()
             if command == CMD_SET_AUTO_CLEAN:
                 # FIXME how to distinguish SET from GET?
-                data = bytes([])
+                data = TestEmptyData()
 
         self.command = command
-        self.data_bytes = data if isinstance(data, bytes) else data.to_bytes()
-        self.data_structure = None if isinstance(data, bytes) else data.data()
+        self.data = data
         self.state = state
 
     def get_frame_bytes(self) -> bytes:
-        _not_stuffed_frame_content = bytes([FRAME_SLAVE_ADR, self.command.code, self.state, len(self.data_bytes)]) + \
-                                     self.data_bytes
+        data_bytes = self.data.to_bytes()
+        _not_stuffed_frame_content = bytes([FRAME_SLAVE_ADR, self.command.code, self.state, len(data_bytes)]) + data_bytes
 
         _stuffed_frame_content = [FRAME_SLAVE_ADR, self.command.code, self.state] + \
-                                 stuffing(bytes([len(self.data_bytes)])) + stuffing(self.data_bytes)
+                                 stuffing(bytes([len(data_bytes)])) + stuffing(data_bytes)
 
         return bytes(
             [FRAME_START] +
@@ -296,22 +313,25 @@ class FrameTests(TestCase):
             the_frame = MISOFrame(simulated_frame.get_frame_bytes())
             self.assertEqual(simulated_frame.command, the_frame.command,
                              "The command returned by frame is different than the one used to create the frame")
-            self.assertEqual(simulated_frame.data_bytes, the_frame.data,
+            self.assertEqual(simulated_frame.data.to_bytes(), the_frame.data,
                              f"The data bytes returned by frame are different than the bytes used to create it")
 
-            if simulated_frame.data_structure:
-                if isinstance(simulated_frame.data_structure, Measurement):
-                    self.assertMeasurementEqual(simulated_frame.data_structure, the_frame.interpret_data())
-                elif isinstance(simulated_frame.data_structure, AutoCleanInterval):
-                    self.assertAutoCleanIntervalEqual(simulated_frame.data_structure, the_frame.interpret_data())
-                elif isinstance(simulated_frame.data_structure, DeviceInfo):
-                    self.assertDeviceInfoEqual(simulated_frame.data_structure, the_frame.interpret_data())
-                elif isinstance(simulated_frame.data_structure, Versions):
-                    self.assertVersionsEqual(simulated_frame.data_structure, the_frame.interpret_data())
-                elif isinstance(simulated_frame.data_structure, DeviceStatus):
-                    self.assertDeviceStatusEqual(simulated_frame.data_structure, the_frame.interpret_data())
-                else:
-                    self.fail(f"Unsupported structure: {type(simulated_frame.data_structure)}")
+            data_structure = simulated_frame.data.data()
+            if isinstance(data_structure, Measurement):
+                self.assertMeasurementEqual(data_structure, the_frame.interpret_data())
+            elif isinstance(data_structure, AutoCleanInterval):
+                self.assertAutoCleanIntervalEqual(data_structure, the_frame.interpret_data())
+            elif isinstance(data_structure, DeviceInfo):
+                self.assertDeviceInfoEqual(data_structure, the_frame.interpret_data())
+            elif isinstance(data_structure, Versions):
+                self.assertVersionsEqual(data_structure, the_frame.interpret_data())
+            elif isinstance(data_structure, DeviceStatus):
+                self.assertDeviceStatusEqual(data_structure, the_frame.interpret_data())
+            elif isinstance(data_structure, dict):
+                # expected empty dict
+                self.assertDictEqual(data_structure, the_frame.interpret_data())
+            else:
+                self.fail(f"Unsupported structure: {type(data_structure)}")
 
     def test_03_MISO_reaction_on_wrong_data(self):
         self.assertRaises(NoDataInResponse, MISOFrame, None)
@@ -395,11 +415,12 @@ class SensirionDeviceSimulator:
         self.current_command: Command = None
         self.response_to_last_command = bytes()
         self.firmware_version = firmware_version
-        # self.protocol_version =
-        # self.hardware_revision = 7
+        self.protocol_version = (2, 0)
+        self.hardware_revision = 7
         self.auto_clean_interval = 604800
-        self.product_type_bytes = "00080000".encode("ASCII") + bytes([0])
-        self.serial_number_bytes: RandomDeviceInfo().to_bytes()
+        self.product_type = "00080000"
+        self.serial_number = TestDataDeviceInfo().device_info.info  # random serial number
+        self.register = 0
 
     def open(self):
         self.is_open = True
@@ -410,7 +431,12 @@ class SensirionDeviceSimulator:
         if self.malfunction == Malfunction.NOT_RESPONDING:
             time.sleep(self.write_timeout)
             raise serial.SerialTimeoutException(f"Simulated timeout after {self.write_timeout:.2f} seconds")
-        self.response_to_last_command = self.prepare_response(frame)
+        if frame == bytes([0]):
+            if self.internal_state == _DeviceSimulatorInternalState.DEEP_SLEEP:
+                self.internal_state = _DeviceSimulatorInternalState.SLEEP
+                self.response_to_last_command = bytes([])
+        else:
+            self.response_to_last_command = self.prepare_response(frame)
 
     def read_all(self) -> bytes:
         if not self.is_open:
@@ -420,20 +446,17 @@ class SensirionDeviceSimulator:
             raise serial.SerialTimeoutException(f"Simulated timeout after {self.timeout:.2f} seconds")
         return self.response_to_last_command
 
-    # FIXME use rather SimulatedFrame
     def response_with_no_data(self, error_code: int = 0, command_code: int = -1) -> bytes:
-        state = 2**7+error_code if error_code > 0 else 0
-        return bytes([
-            FRAME_START,
-            FRAME_SLAVE_ADR,
-            self.current_command.code if command_code < 0 else command_code,
-            stuffing(bytes([state])),
-            0,  # data-len
-            stuffing(bytes([checksum(bytes([self.current_command.code, state]))])),
-            FRAME_STOP
-        ])
+        return SimulatedResponseFrame(
+            command=self.current_command.code if command_code < 0 else command_code,
+            data=TestEmptyData(),
+            state=(2**7+error_code) if error_code > 0 else 0
+        ).get_frame_bytes()
 
     def prepare_response(self, frame: bytes) -> bytes:
+        if self.internal_state == _DeviceSimulatorInternalState.DEEP_SLEEP:
+            return bytes([])
+
         if frame[0] != FRAME_START or frame[-1] != FRAME_STOP or frame[1] != FRAME_SLAVE_ADR:
             return bytes([])  # TODO check what would be the response
 
@@ -447,6 +470,9 @@ class SensirionDeviceSimulator:
         if self.current_command is None or self.current_command.min_version < self.firmware_version:
             return self.response_with_no_data(command_code=frame_content[1], error_code=0x02)
 
+        if self.internal_state == _DeviceSimulatorInternalState.SLEEP and self.current_command != CMD_WAKEUP:
+            return bytes([])
+
         data_len = frame_content[2]
         data = frame_content[3:3+data_len]
 
@@ -455,33 +481,54 @@ class SensirionDeviceSimulator:
                 return self.response_with_no_data(error_code=0x01)
             if data[0] != 0x01 or data[1] not in (0x03, 0x05):
                 return self.response_with_no_data(error_code=0x04)
+            if self.internal_state != _DeviceSimulatorInternalState.IDLE:
+                return self.response_with_no_data(error_code=0x43)
+            self.internal_state = _DeviceSimulatorInternalState.MEASUREMENT
             return self.response_with_no_data()
         if self.current_command == CMD_STOP:
             if data_len != 0:
                 return self.response_with_no_data(error_code=0x01)
+            if self.internal_state != _DeviceSimulatorInternalState.MEASUREMENT:
+                return self.response_with_no_data(error_code=0x43)
+            self.internal_state = _DeviceSimulatorInternalState.IDLE
             return self.response_with_no_data()
         if self.current_command == CMD_MEASURE:
             if data_len != 0:
                 return self.response_with_no_data(error_code=0x01)
+            if self.internal_state != _DeviceSimulatorInternalState.MEASUREMENT:
+                return self.response_with_no_data(error_code=0x43)
             return SimulatedResponseFrame(self.current_command).get_frame_bytes()
         if self.current_command == CMD_SLEEP:
             if data_len != 0:
                 return self.response_with_no_data(error_code=0x01)
+            if self.internal_state != _DeviceSimulatorInternalState.IDLE:
+                return self.response_with_no_data(error_code=0x43)
             return self.response_with_no_data()
         if self.current_command == CMD_WAKEUP:
             if data_len != 0:
                 return self.response_with_no_data(error_code=0x01)
+            if self.internal_state != _DeviceSimulatorInternalState.SLEEP:
+                return self.response_with_no_data(error_code=0x43)
             return self.response_with_no_data()
         if self.current_command == CMD_CLEAN:
             if data_len != 0:
                 return self.response_with_no_data(error_code=0x01)
+            if self.internal_state != _DeviceSimulatorInternalState.MEASUREMENT:
+                return self.response_with_no_data(error_code=0x43)
             return self.response_with_no_data()
         if self.current_command == CMD_SET_AUTO_CLEAN:
+            if self.internal_state not in (
+                    _DeviceSimulatorInternalState.MEASUREMENT,
+                    _DeviceSimulatorInternalState.IDLE):
+                return self.response_with_no_data(error_code=0x43)
             if data_len == 1:
                 # read auto-clean-interval
                 if data[0] != 0x00:
                     return self.response_with_no_data(error_code=0x04)
-                return SimulatedResponseFrame(self.current_command, data=self.auto_clean_interval.to_bytes(4, byteorder="big")).get_frame_bytes()
+                return SimulatedResponseFrame(
+                    self.current_command,
+                    data=TestDataAutoCleanInterval(self.auto_clean_interval)
+                ).get_frame_bytes()
             elif data_len == 5:
                 # write auto-clean-interval
                 if data[0] != 0x00:
@@ -493,23 +540,60 @@ class SensirionDeviceSimulator:
             else:
                 return self.response_with_no_data(error_code=0x01)
         if self.current_command == CMD_INFO:
+            if self.internal_state not in (
+                    _DeviceSimulatorInternalState.MEASUREMENT,
+                    _DeviceSimulatorInternalState.IDLE):
+                return self.response_with_no_data(error_code=0x43)
             if data_len != 1:
                 return self.response_with_no_data(error_code=0x01)
             if data[0] == 0x00:
                 # product type
-                return SimulatedResponseFrame(self.current_command, data=self.product_type_bytes).get_frame_bytes()
+                return SimulatedResponseFrame(
+                    self.current_command,
+                    data=TestDataDeviceInfo(device_info=self.product_type)
+                ).get_frame_bytes()
             elif data[0] == 0x03:
                 # serial number
-                return SimulatedResponseFrame(self.current_command, data=self.serial_number_bytes).get_frame_bytes()
+                return SimulatedResponseFrame(
+                    self.current_command,
+                    data=TestDataDeviceInfo(device_info=self.serial_number)
+                ).get_frame_bytes()
             else:
                 return self.response_with_no_data(error_code=0x04)
         if self.current_command == CMD_VERSION:
-            pass
-        if self.current_command == CMD_STATUS:
-            pass
-        if self.current_command == CMD_RESET:
+            if self.internal_state not in (
+                    _DeviceSimulatorInternalState.MEASUREMENT,
+                    _DeviceSimulatorInternalState.IDLE):
+                return self.response_with_no_data(error_code=0x43)
             if data_len != 0:
                 return self.response_with_no_data(error_code=0x01)
+            return SimulatedResponseFrame(
+                self.current_command,
+                data=TestDataVersions(
+                    firmware=self.firmware_version,
+                    hardware=self.hardware_revision,
+                    protocol=self.protocol_version
+                )
+            ).get_frame_bytes()
+        if self.current_command == CMD_STATUS:
+            if self.internal_state not in (
+                    _DeviceSimulatorInternalState.MEASUREMENT,
+                    _DeviceSimulatorInternalState.IDLE):
+                return self.response_with_no_data(error_code=0x43)
+            if data_len != 0:
+                return self.response_with_no_data(error_code=0x01)
+            return SimulatedResponseFrame(
+                self.current_command,
+                data=TestDataDeviceStatus(0, 0, 0)  # FIXME implement malfunctions
+            ).get_frame_bytes()
+        if self.current_command == CMD_RESET:
+            if self.internal_state not in (
+                    _DeviceSimulatorInternalState.MEASUREMENT,
+                    _DeviceSimulatorInternalState.IDLE):
+                return self.response_with_no_data(error_code=0x43)
+            if data_len != 0:
+                return self.response_with_no_data(error_code=0x01)
+            self.internal_state = _DeviceSimulatorInternalState.IDLE
             return self.response_with_no_data()
 
         # if reached here, it means that one of the commands was omitted
