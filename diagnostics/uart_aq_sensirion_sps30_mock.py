@@ -131,6 +131,7 @@ class SensirionDeviceSimulator:
                 return self.response_with_no_data(error_code=0x01)
             if self.internal_state != _DeviceSimulatorInternalState.IDLE:
                 return self.response_with_no_data(error_code=0x43)
+            self.internal_state = _DeviceSimulatorInternalState.DEEP_SLEEP
             return self.response_with_no_data()
         if self.current_command == CMD_WAKEUP:
             if data_len != 0:
@@ -208,8 +209,11 @@ class SensirionDeviceSimulator:
                     _DeviceSimulatorInternalState.MEASUREMENT,
                     _DeviceSimulatorInternalState.IDLE):
                 return self.response_with_no_data(error_code=0x43)
-            if data_len != 0:
+            if data_len != 1:
                 return self.response_with_no_data(error_code=0x01)
+            # FIXME data interpretation:
+            # 0: Do not clear any bit in the Device Status Register after reading.
+            # 1: Clear all bits in the Device Status Register after reading.
             return SimulatedResponseFrame(
                 command=self.current_command,
                 data=TestDataDeviceStatus(0, 0, 0)  # FIXME implement malfunctions
