@@ -680,7 +680,7 @@ class SensirionSPS30:
     READ_TIMEOUT_MS = 1000
     WRITE_TIMEOUT_MS = 1000
 
-    def __init__(self, port="/dev/ttyAMA0"):
+    def __init__(self, port="/dev/ttyAMA0", _device=None):
         try:
             self._device = serial.Serial(
                 port=port,
@@ -691,7 +691,7 @@ class SensirionSPS30:
                 exclusive=True,  # port cannot be opened in exclusive access mode if it is already open in this mode
                 timeout=SensirionSPS30.READ_TIMEOUT_MS / 1000,
                 write_timeout=SensirionSPS30.WRITE_TIMEOUT_MS / 1000
-            )
+            ) if _device is None else _device
         except serial.SerialException as _x:
             raise DeviceCommunicationError(f"The UART port cannot be initialized. Root cause: {str(_x)}")
         except ValueError as _x:
@@ -826,8 +826,8 @@ class _ContinuousMeasurement(Thread):
 
 class ParticulateMatterMeter:
 
-    def __init__(self, port="/dev/ttyAMA0"):
-        self._sensor = SensirionSPS30(port=port)
+    def __init__(self, port="/dev/ttyAMA0", _device=None):
+        self._sensor = SensirionSPS30(port=port, _device=_device)
         self._versions: Versions = None
         self._serial_number: str = None
         self._continuous_measurement_thread: _ContinuousMeasurement = None

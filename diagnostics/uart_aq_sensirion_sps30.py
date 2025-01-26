@@ -9,8 +9,11 @@ from getch import getch
 
 import sys
 sys.path.append('..')
+sys.path.append('.')
+
 
 from device.dev_serial_sps30 import *
+from uart_aq_sensirion_sps30_mock import SensirionDeviceSimulator
 
 
 def menu(actions_menu: dict) -> Table:
@@ -57,13 +60,30 @@ def update_layout(lout: Layout, console_height: int, actions_menu: dict, history
     return Panel(
         lout,
         title="Sensirion SPS-30 sensor diagnostics tool",
-        # height=console_height - 4
+        height=console_height
     )
 
 
 if __name__ == "__main__":
     console = Console()
     console.clear()
+
+    the_log = []
+
+    requests_history = list()
+    responses_history = list()
+
+    mock_mode = False
+    if len(sys.argv) > 1:
+        for arg in sys.argv[1:]:
+            if arg == "mock":
+                mock_mode = True
+                the_log.append(Text(f"Mock mode activated. The tool will use the module's built-in mock "
+                                    f"instead of physically connected device",
+                                    style=Style(color="red")))
+            else:
+                the_log.append(Text(f"Unrecognized command line argument `{arg}` was ignored",
+                                    style=Style(color="orange3")))
 
     layout = Layout(name="root")
     layout.split_column(
@@ -79,20 +99,16 @@ if __name__ == "__main__":
         Layout(name="response")
     )
 
-    # console.print(Panel(layout, title="Sensirion SPS-30 sensor diagnostics"))
     try:
-        sensor = SensirionSPS30()
+        sensor = SensirionSPS30(_device=SensirionDeviceSimulator() if mock_mode else None)
     except SHDLCError:
         console.print_exception()
         exit(1)
 
-    the_log = [Text(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} Port open for {str(sensor._device)}")]
-
-    requests_history = list()
-    responses_history = list()
+    the_log.append(Text(f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} Port open for {str(sensor._device)}"))
 
     def collect_response(response: MISOFrame):
-       responses_history.append(response)
+        responses_history.append(response)
 
     actions = {
         "W": ("Wake up", lambda: sensor.wake_up(collect_response)),
