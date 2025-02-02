@@ -1,12 +1,10 @@
+import sys
 import time
 from enum import Enum
-
-import sys
 sys.path.append('..')
 sys.path.append('.')
 
-from device.dev_serial_sps30 import *
-from uart_aq_sensirion_sps30_tests import *
+from uart_aq_sensirion_sps30_testdata import *
 
 
 class _DeviceSimulatorInternalState(Enum):
@@ -56,7 +54,7 @@ class SensirionDeviceSimulator:
         if self.malfunction == Malfunction.NOT_RESPONDING:
             time.sleep(self.write_timeout)
             raise serial.SerialTimeoutException(f"Simulated timeout after {self.write_timeout:.2f} seconds")
-        if frame == bytes([0]):
+        if frame == bytes([0xFF]):
             if self.internal_state == _DeviceSimulatorInternalState.DEEP_SLEEP:
                 self.internal_state = _DeviceSimulatorInternalState.SLEEP
                 self.response_to_last_command = bytes([])

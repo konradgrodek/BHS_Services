@@ -52,7 +52,7 @@ class ResponseFrameError(SHDLCError):
 
     def __init__(self, msg: str, data: bytes):
         SHDLCError.__init__(self, f'The received frame has incorrect structure or signalizes an error. {msg}. '
-                                  f'Frame content: {str_bytes(data)}')
+                                  f'Frame content: {str_bytes(data) if data else "NULL"}')
         self.original_bytes_received: bytes = data
 
 
@@ -135,6 +135,7 @@ class ResponseCorrupted(ResponseFrameError):
     def __init__(self, msg: str, data: bytes):
         ResponseFrameError.__init__(self, msg, data)
 
+Empty = namedtuple('EmptyResponse', [])
 
 Measurement = namedtuple('Measurement', [
     'mass_concentration_pm_1_0_ug_m3',
@@ -308,9 +309,9 @@ class MISOFrame:
 
     def interpret_data(self) -> namedtuple:
         if self.command == CMD_START:
-            return {}
+            return Empty()
         if self.command == CMD_STOP:
-            return {}
+            return Empty()
         if self.command == CMD_MEASURE:
             if len(self.data) == 0:
                 raise NoNewMeasurement()
@@ -333,17 +334,17 @@ class MISOFrame:
                 timestamp=self.timestamp,
             )
         if self.command == CMD_SLEEP:
-            return {}
+            return Empty()
         if self.command == CMD_WAKEUP:
-            return {}
+            return Empty()
         if self.command == CMD_CLEAN:
-            return {}
+            return Empty()
         if self.command == CMD_SET_AUTO_CLEAN:
             # to interpret result of this command, the length of the data received is checked
             # this is to distinguish the response on SET from GET - it is not possible to
             # determine it otherwise as the command code is exactly the same
             if len(self.data) == 0:  # SET
-                return {}
+                return Empty()
             # GET
             if len(self.data) != 4:
                 raise ResponseCorrupted(f"It is expected that executing 0x{self.command.code:02X} {self.command.name} "
@@ -382,7 +383,7 @@ class MISOFrame:
                 register=f"{register:b}"
             )
         if self.command == CMD_RESET:
-            return {}
+            return Empty()
 
         raise NotImplementedError(f"The command 0x{self.command.code:02X} {self.command.name} is not supported")
 

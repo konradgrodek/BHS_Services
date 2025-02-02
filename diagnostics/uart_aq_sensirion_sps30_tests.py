@@ -1,12 +1,13 @@
 from unittest import TestCase
-import time
 import random
-from enum import Enum
 
 import sys
 sys.path.append('..')
+sys.path.append('.')
 
 from device.dev_serial_sps30 import *
+from uart_aq_sensirion_sps30_testdata import *
+from uart_aq_sensirion_sps30_mock import SensirionDeviceSimulator
 
 
 class BytesStuffingTests(TestCase):
@@ -55,181 +56,6 @@ class BytesStuffingTests(TestCase):
                       f"List of differences: {', '.join(deviations)}\n"
                       f"Expected data: {str_bytes(data)}\n"
                       f"Actual data: {str_bytes(processed)}")
-
-
-class TestData:
-
-    def to_bytes(self) -> bytes:
-        raise NotImplementedError()
-
-    def data(self) -> namedtuple:
-        raise NotImplementedError()
-
-
-class TestEmptyData(TestData):
-
-    def to_bytes(self) -> bytes:
-        return bytes([])
-
-    def data(self) -> namedtuple:
-        return {}
-
-
-class TestDataMeasurement(TestData):
-    CONCENTRATION = list(range(0, 65535))
-    WEIGHTS = [1 / (3 * c) if c > 0 else 1 / 5 for c in CONCENTRATION]
-
-    def __init__(self):
-        _mass, _number, _size = random.choices(self.CONCENTRATION, weights=self.WEIGHTS, k=3)
-        def _generate_next(x): return min(65535, max(0, x + random.randint(-x // 10, x // 10)))
-        self.measurement = Measurement(
-            mass_concentration_pm_1_0_ug_m3=_mass,
-            mass_concentration_pm_2_5_ug_m3=_generate_next(_mass),
-            mass_concentration_pm_4_0_ug_m3=_generate_next(_mass),
-            mass_concentration_pm_10_ug_m3=_generate_next(_mass),
-            number_concentration_pm_0_5_per_cm3=_number,
-            number_concentration_pm_1_0_per_cm3=_generate_next(_number),
-            number_concentration_pm_2_5_per_cm3=_generate_next(_number),
-            number_concentration_pm_4_0_per_cm3=_generate_next(_number),
-            number_concentration_pm_10_per_cm3=_generate_next(_number),
-            typical_particle_size_um=_size,
-            timestamp=datetime.now()
-        )
-
-    def to_bytes(self) -> bytes:
-        def _to_bytes(x: int): return x.to_bytes(2, byteorder='big')
-        return _to_bytes(self.measurement.mass_concentration_pm_1_0_ug_m3) + \
-            _to_bytes(self.measurement.mass_concentration_pm_2_5_ug_m3) + \
-            _to_bytes(self.measurement.mass_concentration_pm_4_0_ug_m3) + \
-            _to_bytes(self.measurement.mass_concentration_pm_10_ug_m3) + \
-            _to_bytes(self.measurement.number_concentration_pm_0_5_per_cm3) + \
-            _to_bytes(self.measurement.number_concentration_pm_1_0_per_cm3) + \
-            _to_bytes(self.measurement.number_concentration_pm_2_5_per_cm3) + \
-            _to_bytes(self.measurement.number_concentration_pm_4_0_per_cm3) + \
-            _to_bytes(self.measurement.number_concentration_pm_10_per_cm3) + \
-            _to_bytes(self.measurement.typical_particle_size_um)
-
-    def data(self) -> namedtuple:
-        return self.measurement
-
-
-class TestDataAutoCleanInterval(TestData):
-
-    def __init__(self, interval_s = -1):
-        self.auto_clean_interval = AutoCleanInterval(
-            interval_s=random.randint(60*60*24, 60*60*24*7) if interval_s < 0 else interval_s
-        )
-
-    def to_bytes(self) -> bytes:
-        return self.auto_clean_interval.interval_s.to_bytes(4, byteorder='big')
-
-    def data(self) -> namedtuple:
-        return self.auto_clean_interval
-
-
-class TestDataDeviceInfo(TestData):
-
-    def __init__(self, device_info: str = None):
-        self.device_info = DeviceInfo(
-            info=reduce(lambda x, y: x + y, random.choices('ABCDEFGH0123456789', k=16))
-            if device_info is None else device_info
-        )
-
-    def to_bytes(self) -> bytes:
-        # null-terminated ascii string
-        return self.device_info.info.encode('ascii')+bytes([0])
-
-    def data(self) -> namedtuple:
-        return self.device_info
-
-
-class TestDataVersions(TestData):
-
-    def __init__(self, firmware=None, hardware=None, protocol=None):
-        self.versions = Versions(
-            firmware=(random.randint(0, 255), random.randint(0, 255)) if firmware is None else firmware,
-            hardware=random.randint(0, 255) if hardware is None else hardware,
-            protocol=(random.randint(0, 255), random.randint(0, 255)) if protocol is None else protocol
-        )
-
-    def to_bytes(self) -> bytes:
-        return bytes([
-            self.versions.firmware[0],
-            self.versions.firmware[1],
-            0,
-            self.versions.hardware,
-            0,
-            self.versions.protocol[0],
-            self.versions.protocol[1]
-        ])
-
-    def data(self) -> namedtuple:
-        return self.versions
-
-
-class TestDataDeviceStatus(TestData):
-
-    def __init__(self, speed_warning=-1, laser_error=-1, fan_error=-1):
-        s, l, f = (
-            random.randint(0, 1) if speed_warning < 0 else speed_warning,
-            random.randint(0, 1) if laser_error < 0 else laser_error,
-            random.randint(0, 1) if fan_error < 0 else fan_error,
-        )
-
-        self.device_status = DeviceStatus(
-            speed_warning=s,
-            laser_error=l,
-            fan_error=f,
-            register=f"{s*2**21+l*2**5+f*2**4:b}"
-        )
-
-    def to_bytes(self) -> bytes:
-        return int(self.device_status.register, base=2).to_bytes(4, byteorder='big')+bytes([0])
-
-    def data(self) -> namedtuple:
-        return self.device_status
-
-
-class SimulatedResponseFrame:
-
-    def __init__(self, command: Command = None, data: TestData = None, state: int = 0):
-        if command is None:
-            command = random.choice(COMMANDS)
-        if state is None:
-            state = 0
-        if data is None:
-            # generate fake data
-            if command in (CMD_START, CMD_STOP, CMD_SLEEP, CMD_WAKEUP, CMD_CLEAN, CMD_RESET):
-                data = TestEmptyData()
-            if command == CMD_MEASURE:
-                data = TestDataMeasurement()
-            if command == CMD_INFO:
-                data = TestDataDeviceInfo()
-            if command == CMD_VERSION:
-                data = TestDataVersions()
-            if command == CMD_STATUS:
-                data = TestDataDeviceStatus()
-            if command == CMD_SET_AUTO_CLEAN:
-                # FIXME how to distinguish SET from GET?
-                data = TestEmptyData()
-
-        self.command = command
-        self.data = data
-        self.state = state
-
-    def get_frame_bytes(self) -> bytes:
-        data_bytes = self.data.to_bytes()
-        _not_stuffed_frame_content = bytes([FRAME_SLAVE_ADR, self.command.code, self.state, len(data_bytes)]) + data_bytes
-
-        _stuffed_frame_content = [FRAME_SLAVE_ADR, self.command.code, self.state] + \
-                                 stuffing(bytes([len(data_bytes)])) + stuffing(data_bytes)
-
-        return bytes(
-            [FRAME_START] +
-            _stuffed_frame_content +
-            stuffing(bytes([checksum(_not_stuffed_frame_content)])) +
-            [FRAME_STOP]
-        )
 
 
 class FrameTests(TestCase):
@@ -327,9 +153,9 @@ class FrameTests(TestCase):
                 self.assertVersionsEqual(data_structure, the_frame.interpret_data())
             elif isinstance(data_structure, DeviceStatus):
                 self.assertDeviceStatusEqual(data_structure, the_frame.interpret_data())
-            elif isinstance(data_structure, dict):
-                # expected empty dict
-                self.assertDictEqual(data_structure, the_frame.interpret_data())
+            elif isinstance(data_structure, Empty):
+                # expected empty tuple
+                self.assertTupleEqual(data_structure, the_frame.interpret_data())
             else:
                 self.fail(f"Unsupported structure: {type(data_structure)}")
 
@@ -385,3 +211,70 @@ class FrameTests(TestCase):
                           f"I: {str_bytes(invalid_frame_bytes)}")
 
 
+class AbstractTestAdvancedUsage(TestCase):
+
+    def sensor(self) -> SensirionSPS30:
+        raise NotImplementedError()
+
+    def _execute_command(self, action: CommandExecution):
+        action.raise_error()
+        return action.get_miso().interpret_data()
+
+    def assertEmptyResult(self, actual: tuple, cmd: Command):
+        self.assertTupleEqual((), actual, f"{cmd.name} is expected to return no data")
+
+    def assertNamedtupleAllFieldsNonEmpty(self, actual):
+        for attr in actual._fields:
+            self.assertIsNotNone(getattr(actual, attr), f"The {attr} of {type(actual).__name__} "
+                                                        f"unexpectedly happen to be empty")
+
+    def test_Sleep_WakeUp(self):
+        # it is assumed that at the beginning each test starts with device in IDLE mode
+        try:
+            result = self._execute_command(self.sensor().sleep())
+            self.assertEmptyResult(result, CMD_SLEEP)
+            result = self._execute_command(self.sensor().wake_up())
+            self.assertEmptyResult(result, CMD_WAKEUP)
+        except CommandNotAllowed:
+            self.fail(f"Testing putting to sleep and waking up the device failed with 'command not allowed'. "
+                      f"This may be either true problem, or the consequence of prior errors, "
+                      f"leading to incorrect initial state of the device "
+                      f"(IDLE is always assumed to be at the start of each test")
+        except SHDLCError as ex:
+            # failure
+            self.fail(f"Unexpected error occurred while testing waking up the device: {str(ex)}")
+        # each of the tests must clean-up after running, so to be sure next test starts with sensor in IDLE mode
+        # in this example, there's nothing to do
+
+    def test_Measure(self):
+        try:
+            result = self._execute_command(self.sensor().start_measurement())
+            self.assertEmptyResult(result, CMD_START)
+            for _ in range(5):
+                result = self._execute_command(self.sensor().read_measured_values())
+                self.assertIsInstance(result, Measurement, f"Measurement returned unexpected type")
+                print(result)
+                self.assertNamedtupleAllFieldsNonEmpty(result)
+                sleep(1)
+            result = self._execute_command(self.sensor().stop_measurement())
+            self.assertEmptyResult(result, CMD_STOP)
+        except CommandNotAllowed:
+            self.fail(f"Testing putting to sleep and waking up the device failed with 'command not allowed'. "
+                      f"This may be either true problem, or the consequence of prior errors, "
+                      f"leading to incorrect initial state of the device "
+                      f"(IDLE is always assumed to be at the start of each test")
+        except SHDLCError as ex:
+            # failure
+            self.fail(f"Unexpected error occurred while testing waking up the device: {str(ex)}")
+
+
+class TestAdvancedUsageMock(AbstractTestAdvancedUsage):
+
+    def setUp(self) -> None:
+        self.device = SensirionSPS30(_device=SensirionDeviceSimulator())
+
+    def sensor(self) -> SensirionSPS30:
+        return self.device
+
+
+del AbstractTestAdvancedUsage
