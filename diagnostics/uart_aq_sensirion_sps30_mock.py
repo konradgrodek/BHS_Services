@@ -73,7 +73,7 @@ class SensirionDeviceSimulator:
         return SimulatedResponseFrame(
             command=self.current_command if command is None else command,
             data=TestEmptyData(),
-            state=(2**7+error_code) if error_code > 0 else 0
+            state=error_code  # FIXME when malfunction is fully implemented: (2**7+error_code) if error_code > 0 else 0
         ).get_frame_bytes()
 
     def _unknown_command(self, command_code: int) -> Command:

@@ -228,7 +228,26 @@ class AbstractTestAdvancedUsage(TestCase):
             self.assertIsNotNone(getattr(actual, attr), f"The {attr} of {type(actual).__name__} "
                                                         f"unexpectedly happen to be empty")
 
-    def test_Sleep_WakeUp(self):
+    def test_000_Reset(self):
+        try:
+            try:
+                self._execute_command(self.sensor().wake_up())
+            except CommandNotAllowed:
+                # can be safely ignored under assumption the device was in IDLE mode
+                pass
+            result = self._execute_command(self.sensor().reset())
+            self.assertEmptyResult(result, CMD_RESET)
+            # reset should also work in MEASURE mode:
+            self._execute_command(self.sensor().start_measurement())
+            result = self._execute_command(self.sensor().reset())
+            self.assertEmptyResult(result, CMD_RESET)
+        except CommandNotAllowed:
+            self.fail(f"Testing of performing device reset failed with 'command not allowed'")
+        except SHDLCError as ex:
+            # failure
+            self.fail(f"Unexpected error occurred while testing resetting the device: {str(ex)}")
+
+    def test_001_Sleep_WakeUp(self):
         # it is assumed that at the beginning each test starts with device in IDLE mode
         try:
             result = self._execute_command(self.sensor().sleep())
@@ -246,7 +265,7 @@ class AbstractTestAdvancedUsage(TestCase):
         # each of the tests must clean-up after running, so to be sure next test starts with sensor in IDLE mode
         # in this example, there's nothing to do
 
-    def test_Measure(self):
+    def test_002_Measure(self):
         try:
             result = self._execute_command(self.sensor().start_measurement())
             self.assertEmptyResult(result, CMD_START)
@@ -267,6 +286,35 @@ class AbstractTestAdvancedUsage(TestCase):
             # failure
             self.fail(f"Unexpected error occurred while testing waking up the device: {str(ex)}")
 
+    def test_003_Clean(self):
+        try:
+            result = self._execute_command(self.sensor().start_measurement())
+            self.assertEmptyResult(result, CMD_START)
+            result = self._execute_command(self.sensor().start_fan_cleaning())
+            self.assertEmptyResult(result, CMD_CLEAN)
+            result = self._execute_command(self.sensor().stop_measurement())
+            self.assertEmptyResult(result, CMD_STOP)
+            # in IDLE mode CLEAN will fail with CommandNotAllowed
+            try:
+                self._execute_command(self.sensor().start_fan_cleaning())
+                self.fail(f"The {CMD_CLEAN} command in IDLE state should rise {CommandNotAllowed.__name__}, "
+                          f"which has not happen")
+            except CommandNotAllowed:
+                # as expected
+                pass
+
+        except CommandNotAllowed:
+            self.fail(f"Testing of instruction to clean the fan failed with 'command not allowed'. "
+                      f"This may be either true problem, or the consequence of prior errors, "
+                      f"leading to incorrect initial state of the device "
+                      f"(IDLE is always assumed to be at the start of each test")
+        except SHDLCError as ex:
+            # failure
+            self.fail(f"Unexpected error occurred while testing cleaning the fan: {str(ex)}")
+
+    def test_004_SetAutoClean(self):
+        pass
+        # HERE I AM
 
 class TestAdvancedUsageMock(AbstractTestAdvancedUsage):
 
