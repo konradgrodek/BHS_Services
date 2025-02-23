@@ -228,19 +228,29 @@ class AbstractTestAdvancedUsage(TestCase):
             self.assertIsNotNone(getattr(actual, attr), f"The {attr} of {type(actual).__name__} "
                                                         f"unexpectedly happen to be empty")
 
+    def tearDown(self) -> None:
+        self.sensor().close()
+
     def test_000_Reset(self):
         try:
             try:
                 self._execute_command(self.sensor().wake_up())
             except CommandNotAllowed:
-                # can be safely ignored under assumption the device was in IDLE mode
+                # can be safely ignored under assumption the device is in IDLE mode
                 pass
-            result = self._execute_command(self.sensor().reset())
-            self.assertEmptyResult(result, CMD_RESET)
+            self.assertEmptyResult(self._execute_command(self.sensor().reset()), CMD_RESET)
             # reset should also work in MEASURE mode:
-            self._execute_command(self.sensor().start_measurement())
-            result = self._execute_command(self.sensor().reset())
-            self.assertEmptyResult(result, CMD_RESET)
+            self.assertEmptyResult(self._execute_command(self.sensor().start_measurement()), CMD_START)
+            self.assertEmptyResult(self._execute_command(self.sensor().reset()), CMD_RESET)
+            # this should fail
+            try:
+                self._execute_command(self.sensor().read_measured_values())
+                # try to recover
+                self._execute_command(self.sensor().stop_measurement())
+                self.fail(f"Measuring values should not be possible after reset!")
+            except CommandNotAllowed:
+                # expected
+                pass
         except CommandNotAllowed:
             self.fail(f"Testing of performing device reset failed with 'command not allowed'")
         except SHDLCError as ex:
@@ -312,14 +322,130 @@ class AbstractTestAdvancedUsage(TestCase):
             # failure
             self.fail(f"Unexpected error occurred while testing cleaning the fan: {str(ex)}")
 
-    def test_004_SetAutoClean(self):
-        pass
-        # HERE I AM
+    def test_004_AutoClean(self):
+        try:
+            result = self._execute_command(self.sensor().get_auto_cleaning_interval())
+            self.assertIsInstance(result, AutoCleanInterval, f"Auto-clean GET returned unexpected type")
+            print(result)
+            old_interval = result.interval_s
+            new_interval = 12 * 60 * 60
+            result = self._execute_command(self.sensor().set_auto_cleaning_interval(new_interval))
+            self.assertEmptyResult(result, CMD_SET_AUTO_CLEAN)
+            result = self._execute_command(self.sensor().get_auto_cleaning_interval())
+            self.assertEqual(new_interval, result.interval_s, f"The returned auto-clean period differs from expected")
+            # restoring the old value will be done during active measurement, when it should also be possible
+            self.assertEmptyResult(self._execute_command(self.sensor().start_measurement()), CMD_START)
+            self.assertEmptyResult(self._execute_command(
+                self.sensor().set_auto_cleaning_interval(old_interval)), CMD_SET_AUTO_CLEAN)
+            result = self._execute_command(self.sensor().get_auto_cleaning_interval())
+            self.assertEqual(old_interval, result.interval_s, f"The returned auto-clean period differs from expected")
+            self.assertEmptyResult(self._execute_command(self.sensor().stop_measurement()), CMD_STOP)
+        except CommandNotAllowed:
+            self.fail(f"Testing of setting auto-clean the fan failed with 'command not allowed'. "
+                      f"This may be either true problem, or the consequence of prior errors, "
+                      f"leading to incorrect initial state of the device "
+                      f"(IDLE is always assumed to be at the start of each test")
+        except SHDLCError as ex:
+            # failure
+            self.fail(f"Unexpected error occurred while testing setting auto-clean the fan: {str(ex)}")
+
+    def test_005_DeviceInformation(self):
+        try:
+            result = self._execute_command(self.sensor().get_product_type())
+            self.assertIsInstance(result, DeviceInfo, f"Request for product type resulted in unexpected type")
+            print(result)
+            self.assertIsNotNone(result.info, f"The returned product type is None")
+            self.assertNotEqual("", result.info, f"The returned product type is empty")
+            result = self._execute_command(self.sensor().get_serial_number())
+            self.assertIsInstance(result, DeviceInfo, f"Request for serial number resulted in unexpected type")
+            print(result)
+            self.assertIsNotNone(result.info, f"The returned serial number is None")
+            self.assertNotEqual("", result.info, f"The returned serial number is empty")
+
+            # the same should be possible in MEASURE mode
+            self.assertEmptyResult(self._execute_command(self.sensor().start_measurement()), CMD_START)
+
+            result = self._execute_command(self.sensor().get_product_type())
+            self.assertIsInstance(result, DeviceInfo, f"Request for product type resulted in unexpected type")
+            result = self._execute_command(self.sensor().get_serial_number())
+            self.assertIsInstance(result, DeviceInfo, f"Request for serial number resulted in unexpected type")
+
+            self.assertEmptyResult(self._execute_command(self.sensor().stop_measurement()), CMD_STOP)
+
+        except CommandNotAllowed:
+            self.fail(f"Testing of providing device information failed with 'command not allowed'. "
+                      f"This may be either true problem, or the consequence of prior errors, "
+                      f"leading to incorrect initial state of the device "
+                      f"(IDLE is always assumed to be at the start of each test")
+        except SHDLCError as ex:
+            # failure
+            self.fail(f"Unexpected error occurred while running test for getting device information: {str(ex)}")
+
+    def test_006_Versions(self):
+        try:
+            result = self._execute_command(self.sensor().get_version())
+            self.assertIsInstance(result, Versions, f"Request for versions resulted in unexpected type")
+            print(result)
+
+            # the same should be possible in MEASURE mode
+            self.assertEmptyResult(self._execute_command(self.sensor().start_measurement()), CMD_START)
+
+            result = self._execute_command(self.sensor().get_version())
+            self.assertIsInstance(result, Versions, f"Request for versions resulted in unexpected type")
+
+            self.assertEmptyResult(self._execute_command(self.sensor().stop_measurement()), CMD_STOP)
+
+        except CommandNotAllowed:
+            self.fail(f"Testing of providing version information failed with 'command not allowed'. "
+                      f"This may be either true problem, or the consequence of prior errors, "
+                      f"leading to incorrect initial state of the device "
+                      f"(IDLE is always assumed to be at the start of each test")
+        except SHDLCError as ex:
+            # failure
+            self.fail(f"Unexpected error occurred while running test for getting versions: {str(ex)}")
+
+    def test_007_Status(self):
+        try:
+            result = self._execute_command(self.sensor().get_status())
+            self.assertIsInstance(result, DeviceStatus, f"Request for device status resulted in unexpected type")
+            print(result)
+            # it is expected that the device will not signalize any issues
+            self.assertFalse(result.speed_warning, f"The device signalizes problems with speed of the fan")
+            self.assertFalse(result.laser_error, f"The device signalizes problems with laser")
+            self.assertFalse(result.fan_error, f"The device signalizes problems with the fan")
+            # do not verify the other bits of the register
+
+            # the same should be possible in MEASURE mode
+            self.assertEmptyResult(self._execute_command(self.sensor().start_measurement()), CMD_START)
+
+            result = self._execute_command(self.sensor().get_status())
+            self.assertIsInstance(result, DeviceStatus, f"Request for device status resulted in unexpected type")
+
+            self.assertEmptyResult(self._execute_command(self.sensor().stop_measurement()), CMD_STOP)
+
+        except CommandNotAllowed:
+            self.fail(f"Testing of providing device status failed with 'command not allowed'. "
+                      f"This may be either true problem, or the consequence of prior errors, "
+                      f"leading to incorrect initial state of the device "
+                      f"(IDLE is always assumed to be at the start of each test")
+        except SHDLCError as ex:
+            # failure
+            self.fail(f"Unexpected error occurred while running test for getting versions: {str(ex)}")
+
 
 class TestAdvancedUsageMock(AbstractTestAdvancedUsage):
 
     def setUp(self) -> None:
         self.device = SensirionSPS30(_device=SensirionDeviceSimulator())
+
+    def sensor(self) -> SensirionSPS30:
+        return self.device
+
+
+class TestAdvancedUsage(AbstractTestAdvancedUsage):
+
+    def setUp(self) -> None:
+        self.device = SensirionSPS30()
 
     def sensor(self) -> SensirionSPS30:
         return self.device

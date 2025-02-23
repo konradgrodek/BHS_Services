@@ -616,7 +616,7 @@ class WriteAutoCleaningInterval(CommandExecution):
     """
 
     def __init__(self, device: serial.Serial, device_lock: Lock, ac_interval_s: int):
-        if ac_interval_s <= 0 or ac_interval_s >= 2 ^ 32:
+        if 0 >= ac_interval_s >= (2 ^ 32):
             raise ConfigurationError(f"Auto cleaning interval {ac_interval_s} is out of the acceptable bounds "
                                      f"(should be an unsigned 32-bit int)")
 
@@ -703,6 +703,10 @@ class SensirionSPS30:
         if not self._device.is_open:
             self._device.open()
         return self._device
+
+    def close(self):
+        if self._device.is_open:
+            self._device.close()
 
     def _handle_action(self, action: CommandExecution, callback_fnc) -> CommandExecution:
         if callback_fnc is not None:

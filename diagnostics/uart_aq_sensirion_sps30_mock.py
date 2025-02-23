@@ -1,6 +1,8 @@
 import sys
 import time
 from enum import Enum
+from threading import Event
+from serial.serialutil import SerialException
 sys.path.append('..')
 sys.path.append('.')
 
@@ -20,6 +22,7 @@ class Malfunction(Enum):
 
 
 class SensirionDeviceSimulator:
+    _PORT_LOCK = Event()
     """
     This implements the mock-up for Sensirion SPS-30 device by mimicking serial.Serial implementation.
     It provides the same API as used by the driver to get data from serial port
@@ -46,7 +49,19 @@ class SensirionDeviceSimulator:
         return f"SPS-30 Mock, fw ver {self.firmware_version[0]}.{self.firmware_version[1]}"
 
     def open(self):
+        if SensirionDeviceSimulator._PORT_LOCK.is_set():
+            raise SerialException(f"Could not exclusively lock port {self.port}: "
+                                  f"[Errno 11] Resource temporarily unavailable")
         self.is_open = True
+        SensirionDeviceSimulator._PORT_LOCK.set()
+
+    def close(self):
+        if self.is_open:
+            self.is_open = False
+            SensirionDeviceSimulator._PORT_LOCK.clear()
+
+    def __del__(self):
+        self.close()
 
     def write(self, frame: bytes):
         if not self.is_open:
